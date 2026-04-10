@@ -1,0 +1,226 @@
+{
+  "_comment": "Supertails \u2014 Unlocking Bangalore Campaign Tracking Config",
+  "campaign": {
+    "name": "Unlocking Bangalore",
+    "start_date": "2026-04-15",
+    "phase": "01",
+    "phase_label": "OOH + Auto + Clinic Activations",
+    "activation_log": [
+      {
+        "date": "2026-04-15",
+        "event": "OOH Wave 1 Live",
+        "type": "ooh"
+      },
+      {
+        "date": "2026-04-15",
+        "event": "Auto Branding Live",
+        "type": "auto"
+      },
+      {
+        "date": "2026-04-15",
+        "event": "BLR Digital Campaigns Live",
+        "type": "digital"
+      }
+    ]
+  },
+  "baselines": {
+    "_comment": "Pre-campaign weekly averages (Jan 5 \u2013 Mar 22 2026, excludes WTF Sale). All-India. Lock before Apr 15.",
+    "branded_search_impressions": 9044,
+    "total_nonpaid_sessions_india": 0,
+    "total_paid_sessions_india": 0,
+    "direct_sessions_india": 0,
+    "brand_paid_sessions_india": 0,
+    "blr_paid_sessions_india": 0,
+    "direct_installs_india": 4950,
+    "revenue_india_daily": 5687130,
+    "revenue_india_weekly": 39809911,
+    "new_customers_india_per_week": 0,
+    "revenue_india_per_week": 0,
+    "gads_brand_spend_per_week": 0,
+    "gads_brand_clicks_per_week": 0,
+    "gads_brand_impressions_per_week": 0,
+    "_to_fill": "Run backfill_ga4.py --force, then compute Jan5\u2013Mar22 weekly avg from data_store.json and fill zeros"
+  },
+  "google_search_console": {
+    "service_account_key_path": "gsc_service_account.json",
+    "site_url": "sc-domain:supertails.com",
+    "geo_country": "ind",
+    "branded_queries": [
+      "supertails",
+      "super tails",
+      "supertail",
+      "supertails bangalore",
+      "supertails bengaluru",
+      "supertails store",
+      "supertails store bangalore",
+      "supertails shop",
+      "supertails near me",
+      "supertails outlet",
+      "supertails app",
+      "supertails website",
+      "supertails.com",
+      "download supertails",
+      "install supertails",
+      "supertails vet",
+      "supertails vet at home",
+      "supertails call a vet",
+      "supertails online vet",
+      "supertails doctor",
+      "supertails pet doctor",
+      "super tails vet",
+      "super tails vet at home",
+      "supertails veterinary",
+      "supertails 30 minute delivery",
+      "supertails 30 min delivery",
+      "supertails fast delivery",
+      "supertails express delivery",
+      "supertails quick delivery",
+      "supertails now",
+      "supertails instant delivery",
+      "supertails same day delivery",
+      "supertails medicine",
+      "supertails medicine delivery",
+      "supertails pet medicine",
+      "super tails medicine delivery",
+      "supertails pharmacy",
+      "supertails pet pharmacy",
+      "supertails prescription",
+      "supertails pet food",
+      "supertails dog food",
+      "supertails cat food",
+      "supertails dog treats",
+      "supertails cat treats",
+      "supertails food delivery",
+      "supertails grooming",
+      "supertails pet grooming",
+      "supertails grooming bangalore",
+      "supertails banashankari",
+      "super tails banashankari",
+      "supertails koramangala",
+      "super tails koramangala",
+      "supertails kr puram",
+      "supertails k r puram",
+      "super tails kr puram",
+      "supertails bannerghata",
+      "super tails bannerghata",
+      "supertails bannerghatta",
+      "supertails brookefield",
+      "super tails brookefield",
+      "supertails kalyan nagar",
+      "super tails kalyan nagar",
+      "supertails rajajinagar",
+      "super tails rajajinagar",
+      "supertails rt nagar",
+      "super tails rt nagar",
+      "supertails r t nagar",
+      "supertails indiranagar",
+      "super tails indiranagar",
+      "supertails indira nagar",
+      "supertails offer",
+      "supertails discount",
+      "supertails coupon",
+      "supertails promo",
+      "supertails sale",
+      "supertails cashback",
+      "supertails review",
+      "supertails reviews",
+      "supertails good",
+      "is supertails good",
+      "supertails vs",
+      "supertails customer care",
+      "supertails contact",
+      "supertails helpline"
+    ]
+  },
+  "ga4": {
+    "_comment": "Service account must have Viewer access on GA4 property 369090123.",
+    "service_account_key_path": "gsc_service_account.json",
+    "property_id": "369090123",
+    "geo_mode": "india",
+    "_geo_mode_note": "Set to 'india' for all-India (no city filter). Set to 'bangalore' to filter by bangalore_city_values.",
+    "bangalore_city_values": [
+      "Bangalore",
+      "Bengaluru"
+    ],
+    "direct_channel_values": [
+      "Direct"
+    ],
+    "paid_channel_groups": [
+      "Paid Search",
+      "Paid Social",
+      "Display",
+      "Performance Max",
+      "Paid Shopping",
+      "Paid Other"
+    ],
+    "paid_channels": [
+      "Paid Search",
+      "Paid Social",
+      "Display"
+    ],
+    "_nonpaid_note": "Non-paid = everything NOT in paid_channel_groups. GA4 standard groups: Organic Search, Direct, Referral, Organic Social, Email, SMS, Affiliates, Organic Shopping, Organic Video, Audio.",
+    "brand_campaign_contains": [
+      "Brand"
+    ],
+    "blr_campaign_contains": [
+      "BLR"
+    ]
+  },
+  "google_ads": {
+    "_comment": "Google Ads API credentials. Get developer_token from https://ads.google.com/aw/apicenter. Generate refresh_token via OAuth2 (run: python3 generate_gads_token.py). customer_id is your 10-digit Ads account ID (no dashes).",
+    "developer_token": "YOUR_DEVELOPER_TOKEN",
+    "client_id": "YOUR_OAUTH_CLIENT_ID",
+    "client_secret": "YOUR_OAUTH_CLIENT_SECRET",
+    "refresh_token": "YOUR_REFRESH_TOKEN",
+    "customer_id": "YOUR_CUSTOMER_ID_NO_DASHES",
+    "brand_campaign_contains": [
+      "Brand"
+    ],
+    "blr_campaign_contains": [
+      "BLR"
+    ],
+    "metrics": [
+      "impressions",
+      "clicks",
+      "cost_micros",
+      "ctr",
+      "average_cpc",
+      "search_impression_share",
+      "search_budget_lost_impression_share",
+      "search_rank_lost_impression_share"
+    ]
+  },
+  "appsflyer": {
+    "_comment": "No Pull API access. Data loaded via CSV exports. See README for column mapping.",
+    "android_app_id": "com.coffye.dqiabm",
+    "ios_app_id": "id1670908360",
+    "organic_media_source": "Organic",
+    "clinic_media_sources": [
+      "Offline_Clinic",
+      "Offline_health_clinic",
+      "QR_code"
+    ]
+  },
+  "meltwater": {
+    "_comment": "API key from Meltwater \u2192 Settings \u2192 API. search_ids: one master search covering brand + campaign + Danish Sait + OOH + Bangalore. Get Search ID from Meltwater URL when viewing the saved search.",
+    "api_key": "Pnc1x7hApAJHA3ioavCcekF8NvfcmimThRq7sIiu",
+    "search_ids": {
+      "brand_campaign_master": "28527401",
+      "competitor_huft": "SEARCH_ID_HUFT",
+      "competitor_wiggles": "SEARCH_ID_WIGGLES",
+      "competitor_petsutra": "SEARCH_ID_PETSUTRA",
+      "negative_sentiment": "SEARCH_ID_NEGATIVE"
+    },
+    "campaign_hashtags": [
+      "#Supertails",
+      "#SupertailsBangalore",
+      "#SupertailsIndia",
+      "#DanishSait",
+      "#NammaBangalorePets",
+      "#BangalorePets",
+      "#PetsBangalore",
+      "#SupertailsAd"
+    ],
+    "_query_brand_campaign_master": "(((\"supertails\" OR \"super tails\" OR \"supertails.com\") AND NOT (\"sonic\" OR \"sega\" OR \"nintendo\" OR \"playstation\" OR \"xbox\" OR \"steam\" OR \"video game\" OR \"game\" OR \"mod\" OR \"rom\" OR \"fan art\" OR \"fanart\" OR \"cosplay\" OR \"miles prower\")) OR ((\"danish sait\" OR \"danishsait\") AND (\"pet\" OR \"dog\" OR \"cat\" OR \"bangalore\" OR \"bengaluru\" OR \"ad\" OR \"film\" OR \"campaign\" OR \"brand\")) OR (\"#supertails\" OR \"#supertailsbangalore\" OR \"#supertailsindia\" OR \"#supertailsad\" OR \"#danishsait\"))"
+  }
+}
