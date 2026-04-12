@@ -1,5 +1,5 @@
 {
-  "_comment": "Supertails \u2014 Unlocking Bangalore Campaign Tracking Config",
+  "_comment": "Supertails — Unlocking Bangalore Campaign Tracking Config",
   "campaign": {
     "name": "Unlocking Bangalore",
     "start_date": "2026-04-15",
@@ -24,22 +24,21 @@
     ]
   },
   "baselines": {
-    "_comment": "Pre-campaign weekly averages (Jan 5 \u2013 Mar 22 2026, excludes WTF Sale). All-India. Lock before Apr 15.",
+    "_comment": "Pre-campaign weekly averages (Jan 5 – Mar 22 2026, excl. WTF Sale). All-India. Locked Apr 12.",
     "branded_search_impressions": 9044,
-    "total_nonpaid_sessions_india": 0,
-    "total_paid_sessions_india": 0,
-    "direct_sessions_india": 0,
-    "brand_paid_sessions_india": 0,
-    "blr_paid_sessions_india": 0,
-    "direct_installs_india": 4950,
+    "total_nonpaid_sessions_india": 694165,
+    "total_paid_sessions_india": 324979,
+    "direct_sessions_india": 63445,
+    "brand_paid_sessions_india": 162760,
+    "blr_paid_sessions_india": 23215,
+    "direct_installs_india": 6440,
     "revenue_india_daily": 5687130,
     "revenue_india_weekly": 39809911,
     "new_customers_india_per_week": 0,
     "revenue_india_per_week": 0,
     "gads_brand_spend_per_week": 0,
     "gads_brand_clicks_per_week": 0,
-    "gads_brand_impressions_per_week": 0,
-    "_to_fill": "Run backfill_ga4.py --force, then compute Jan5\u2013Mar22 weekly avg from data_store.json and fill zeros"
+    "gads_brand_impressions_per_week": 0
   },
   "google_search_console": {
     "service_account_key_path": "gsc_service_account.json",
@@ -202,8 +201,8 @@
     ]
   },
   "meltwater": {
-    "_comment": "API key from Meltwater \u2192 Settings \u2192 API. search_ids: one master search covering brand + campaign + Danish Sait + OOH + Bangalore. Get Search ID from Meltwater URL when viewing the saved search.",
-    "api_key": "Pnc1x7hApAJHA3ioavCcekF8NvfcmimThRq7sIiu",
+    "_comment": "API key from Meltwater → Settings → API. search_ids: one master search covering brand + campaign + Danish Sait + OOH + Bangalore. Get Search ID from Meltwater URL when viewing the saved search.",
+    "api_key": "O4YhAUXmOuvSweqxBKnwgEPkLB4dtfrQJpBOb6I6",
     "search_ids": {
       "brand_campaign_master": "28527401",
       "competitor_huft": "SEARCH_ID_HUFT",
@@ -222,5 +221,11 @@
       "#SupertailsAd"
     ],
     "_query_brand_campaign_master": "(((\"supertails\" OR \"super tails\" OR \"supertails.com\") AND NOT (\"sonic\" OR \"sega\" OR \"nintendo\" OR \"playstation\" OR \"xbox\" OR \"steam\" OR \"video game\" OR \"game\" OR \"mod\" OR \"rom\" OR \"fan art\" OR \"fanart\" OR \"cosplay\" OR \"miles prower\")) OR ((\"danish sait\" OR \"danishsait\") AND (\"pet\" OR \"dog\" OR \"cat\" OR \"bangalore\" OR \"bengaluru\" OR \"ad\" OR \"film\" OR \"campaign\" OR \"brand\")) OR (\"#supertails\" OR \"#supertailsbangalore\" OR \"#supertailsindia\" OR \"#supertailsad\" OR \"#danishsait\"))"
+  },
+  "signals_configured": {
+    "gsc": true,
+    "ga4": true,
+    "appsflyer": true,
+    "meltwater": true
   }
 }
