@@ -2552,13 +2552,15 @@ function resetComparison(){
 
 // ── Activation log
 const logBody=document.getElementById('logBody');
-const tagMap={ooh:'t-ooh',auto:'t-auto',activation:'t-act',pr:'t-pr',festival:'t-fest'};
-(S.activation_log||[]).forEach(e=>{
-  logBody.innerHTML+=`<tr><td>${e.date}</td><td>${e.event}</td>
-    <td><span class="tag ${tagMap[e.type]||'t-ooh'}">${e.type.toUpperCase()}</span></td></tr>`;
-});
-if(!(S.activation_log||[]).length)
-  logBody.innerHTML='<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:18px">No activation events logged yet — add them in config.json</td></tr>';
+if(logBody){
+  const tagMap={ooh:'t-ooh',auto:'t-auto',activation:'t-act',pr:'t-pr',festival:'t-fest'};
+  (S.activation_log||[]).forEach(e=>{
+    logBody.innerHTML+=`<tr><td>${e.date}</td><td>${e.event}</td>
+      <td><span class="tag ${tagMap[e.type]||'t-ooh'}">${e.type.toUpperCase()}</span></td></tr>`;
+  });
+  if(!(S.activation_log||[]).length)
+    logBody.innerHTML='<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:18px">No activation events logged yet — add them in config.json</td></tr>';
+}
 
 // ── Initial render (last 90 days)
 renderDashboard(sliceByDate(view90,maxDate),gran);
