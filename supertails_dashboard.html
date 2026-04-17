@@ -655,9 +655,10 @@ tick();
   const note = document.getElementById('cityNote');
   if(!CITY_LIST.length){ note.textContent='Run backfill_ga4_cities.py to enable city filter'; return; }
   CITY_LIST.forEach(city=>{
+    if(!city) return;  // skip null/undefined entries
     const b = document.createElement('button');
     b.className = 'city-btn';
-    b.id = 'city-'+city.replace(/\s+/g,'-');
+    b.id = 'city-'+String(city).replace(/\s+/g,'-');
     b.textContent = city;
     b.onclick = () => setCity(city);
     wrap.appendChild(b);
