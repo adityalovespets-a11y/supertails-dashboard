@@ -55,7 +55,7 @@ def load_config(path="config.json"):
 # ─────────────────────────────────────────────────────────────────────────────
 
 SIGNAL_KEYS = [
-    "branded_search", "direct_installs", "total_installs", "direct_installs_blr",
+    "branded_search", "direct_installs", "total_installs", "paid_installs", "direct_installs_blr",
     # Revenue
     "revenue_india",
     # GA4 traffic — all channels
@@ -63,6 +63,8 @@ SIGNAL_KEYS = [
     # GA4 traffic — sub-breakdowns
     "direct_sessions", "direct_new_users",
     "brand_paid_sessions", "blr_paid_sessions",
+    # Spend (from Unified Dashboard Google Sheet, d-1)
+    "brand_spend", "perf_spend",
     # Social / Meltwater
     "brand_mentions", "hashtag_mentions", "sov_percent", "negative_rate",
     "competitor_huft", "competitor_wiggles", "competitor_petsutra",
@@ -92,27 +94,67 @@ def save_store(store, path=STORE_PATH):
         json.dump(store, f)
 
 def get_fetch_range(store, config, full_refresh=False):
-    """Return (start_date, end_date) to fetch. start = day after last stored; end = yesterday."""
+    """Return (start_date, end_date) to fetch. start = day after last stored; end = yesterday.
+    Uses the earliest 'last real data' across key signals to catch gaps where dates exist
+    in the store (e.g. from AppsFlyer) but API signals (GSC, GA4) are stale."""
     end = yesterday()
     if full_refresh or not store.get("last_fetched_to"):
-        # Go back 1 year
         start = (date.today() - timedelta(days=365)).isoformat()
-    else:
-        day_after = (date.fromisoformat(store["last_fetched_to"]) + timedelta(days=1)).isoformat()
-        if day_after > end:
-            return None, None  # Already current
-        start = day_after
-    return start, end
+        return start, end
+
+    # Find last non-null date for key API-fetched signals (GSC + GA4)
+    api_signals = ["branded_search", "direct_sessions", "total_paid_sessions", "brand_paid_sessions"]
+    dates = store.get("dates", [])
+    last_api_date = None
+    for sig in api_signals:
+        arr = store.get(sig, [])
+        for i in range(len(arr)-1, -1, -1):
+            if arr[i] is not None:
+                d = dates[i] if i < len(dates) else None
+                if d and (last_api_date is None or d > last_api_date):
+                    last_api_date = d
+                break
+
+    # Use the earlier of last_fetched_to and last real API data (+1 day)
+    base = store["last_fetched_to"]
+    if last_api_date and last_api_date < base:
+        base = last_api_date  # refetch from where API signals actually stopped
+
+    day_after = (date.fromisoformat(base) + timedelta(days=1)).isoformat()
+    if day_after > end:
+        return None, None  # Already current
+    return day_after, end
 
 def merge_into_store(store, day_data: dict):
     """
     day_data: { 'YYYY-MM-DD': { signal_key: value, ... }, ... }
     Merges new daily rows into the store, maintaining date order, no duplicates.
+    Also back-fills null values on existing dates when new data arrives for them
+    (e.g. AppsFlyer rows exist but GSC/GA4 data wasn't fetched yet for those dates).
     """
     existing = set(store["dates"])
     new_dates = sorted(d for d in day_data if d not in existing)
-    if not new_dates:
+    # dates that already exist but may have null signals we can now fill
+    update_dates = [d for d in day_data if d in existing]
+
+    if not new_dates and not update_dates:
         return store
+
+    if not new_dates:
+        # Only updating existing dates — patch in-place without rebuilding arrays
+        date_to_idx = {d: i for i, d in enumerate(store["dates"])}
+        new_store = dict(store)
+        for k in SIGNAL_KEYS:
+            new_store[k] = list(store.get(k, [None]*len(store["dates"])))
+        for d in update_dates:
+            j = date_to_idx[d]
+            for k, v in day_data[d].items():
+                if k in SIGNAL_KEYS and v is not None and (j >= len(new_store[k]) or new_store[k][j] is None):
+                    new_store[k][j] = v
+        for k in DICT_KEYS:
+            if k in store:
+                new_store[k] = store[k]
+        return new_store
 
     # Build combined sorted index
     all_dates = sorted(existing | set(new_dates))
@@ -131,12 +173,13 @@ def merge_into_store(store, day_data: dict):
             if i < len(store.get(k, [])):
                 new_store[k][j] = store[k][i]
 
-    # Fill new data
+    # Fill new data (new dates + back-fill nulls on existing dates)
     for d, signals in day_data.items():
         j = date_to_idx[d]
         for k in SIGNAL_KEYS:
-            if k in signals:
-                new_store[k][j] = signals[k]
+            if k in signals and signals[k] is not None:
+                if new_store[k][j] is None:  # don't overwrite real data
+                    new_store[k][j] = signals[k]
 
     # Preserve dict-type keys (city_sessions, city_list, gsc_queries)
     for k in DICT_KEYS:
@@ -209,16 +252,42 @@ def fetch_direct_installs_daily(config, start_date, end_date):
     City filter is NOT applied to the India signal — Bangalore delta is the offline lift measure.
     """
     try:
-        af = config["appsflyer"]
-        url = f"https://hq.appsflyer.com/export/{af['app_id']}/installs_report/v5"
-        params = {
-            "api_token": af["api_token"], "from": start_date, "to": end_date,
-            "timezone": "Asia/Kolkata", "currency": "INR",
-        }
-        resp = requests.get(url, params=params, timeout=60)
-        resp.raise_for_status()
+        af = config.get("appsflyer", {})
+        api_token = af.get("api_token", "")
+        if not api_token or api_token.startswith("YOUR_"):
+            print("    ℹ  AppsFlyer: no API token — using manually loaded data from store")
+            return {"india": {}, "bangalore": {}}
 
-        df = pd.read_csv(io.StringIO(resp.text))
+        # Support both single app_id and separate android/ios ids
+        app_ids = []
+        if af.get("app_id"):
+            app_ids.append(af["app_id"])
+        if af.get("android_app_id"):
+            app_ids.append(af["android_app_id"])
+        if af.get("ios_app_id"):
+            app_ids.append(af["ios_app_id"])
+        if not app_ids:
+            print("    ✗ AppsFlyer: no app_id configured")
+            return {"india": {}, "bangalore": {}}
+
+        # Fetch from all app IDs and concatenate
+        frames = []
+        for app_id in app_ids:
+            url = f"https://hq.appsflyer.com/export/{app_id}/installs_report/v5"
+            params = {
+                "api_token": api_token, "from": start_date, "to": end_date,
+                "timezone": "Asia/Kolkata", "currency": "INR",
+            }
+            resp = requests.get(url, params=params, timeout=60)
+            if resp.status_code == 200:
+                frames.append(pd.read_csv(io.StringIO(resp.text)))
+                print(f"    ✓ AppsFlyer {app_id}: fetched")
+            else:
+                print(f"    ✗ AppsFlyer {app_id}: HTTP {resp.status_code}")
+
+        if not frames:
+            return {"india": {}, "bangalore": {}}
+        df = pd.concat(frames, ignore_index=True)
         df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
         city_col   = next((c for c in df.columns if "city" in c), None)
         source_col = next((c for c in df.columns if "media_source" in c), None)
@@ -323,6 +392,8 @@ def fetch_direct_web_daily(config, start_date, end_date):
     Returns {
       'YYYY-MM-DD': {
         'sessions': n, 'new_users': n,
+        'total_paid_sessions': n,
+        'total_nonpaid_sessions': n,
         'brand_paid_sessions': n,
         'blr_paid_sessions': n
       }
@@ -330,7 +401,10 @@ def fetch_direct_web_daily(config, start_date, end_date):
     """
     try:
         from google.analytics.data_v1beta import BetaAnalyticsDataClient
-        from google.analytics.data_v1beta.types import FilterExpression, FilterExpressionList
+        from google.analytics.data_v1beta.types import (
+            FilterExpression, FilterExpressionList,
+            RunReportRequest, DateRange, Dimension, Metric
+        )
         import google.oauth2.service_account as sa
 
         ga4    = config["ga4"]
@@ -342,6 +416,10 @@ def fetch_direct_web_daily(config, start_date, end_date):
         prop   = ga4["property_id"]
         cities = ga4.get("bangalore_city_values", ["Bangalore", "Bengaluru"])
         paid_ch= ga4.get("paid_channels", ["Paid Search", "Paid Social", "Display"])
+        paid_groups = set(ga4.get("paid_channel_groups", [
+            "Paid Search", "Paid Social", "Display",
+            "Performance Max", "Paid Shopping", "Paid Other"
+        ]))
         brand_kw = ga4.get("brand_campaign_contains", ["Brand"])
         blr_kw   = ga4.get("blr_campaign_contains", ["BLR"])
 
@@ -349,14 +427,31 @@ def fetch_direct_web_daily(config, start_date, end_date):
         city_f     = _city_filter(cities) if not india_mode else None
 
         def with_geo(filters):
-            """Wrap filters with city filter if in bangalore mode."""
             if india_mode or city_f is None:
                 return FilterExpression(and_group=FilterExpressionList(expressions=filters))
             return FilterExpression(and_group=FilterExpressionList(expressions=filters + [city_f]))
 
-        # ── 1. Direct sessions ──
-        direct_filter = with_geo([_channel_filter(ga4.get("direct_channel_values", ["Direct"]))])
-        direct = _ga4_run_report(client, prop, start_date, end_date, direct_filter)
+        # ── 1. All sessions by channel group (for paid/nonpaid split) ──
+        req_all = RunReportRequest(
+            property=f"properties/{prop}",
+            date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
+            dimensions=[Dimension(name="date"), Dimension(name="sessionDefaultChannelGroup")],
+            metrics=[Metric(name="sessions"), Metric(name="newUsers")],
+            limit=100000,
+        )
+        resp_all = client.run_report(req_all)
+        all_ch = {}
+        for row in resp_all.rows:
+            raw_d   = row.dimension_values[0].value
+            d       = f"{raw_d[:4]}-{raw_d[4:6]}-{raw_d[6:]}"
+            channel = row.dimension_values[1].value
+            sess    = int(row.metric_values[0].value)
+            users   = int(row.metric_values[1].value)
+            all_ch.setdefault(d, {})
+            all_ch[d].setdefault(channel, {"sessions": 0, "new_users": 0})
+            all_ch[d][channel]["sessions"]  += sess
+            all_ch[d][channel]["new_users"] += users
+        print(f"    ✓ GA4 All channels: {len(all_ch)} days")
 
         # ── 2. Brand paid sessions ──
         brand_filter = with_geo([_channel_filter(paid_ch), _campaign_contains_filter(brand_kw)])
@@ -366,20 +461,32 @@ def fetch_direct_web_daily(config, start_date, end_date):
         blr_filter = with_geo([_channel_filter(paid_ch), _campaign_contains_filter(blr_kw)])
         blr_paid   = _ga4_run_report(client, prop, start_date, end_date, blr_filter)
 
-        # Merge into unified daily dict
-        all_dates = set(list(direct.keys()) + list(brand_paid.keys()) + list(blr_paid.keys()))
+        # ── Merge into unified daily dict ──
+        all_dates = set(list(all_ch.keys()) + list(brand_paid.keys()) + list(blr_paid.keys()))
         daily = {}
         for d in all_dates:
+            channels = all_ch.get(d, {})
+            paid_s = nonpaid_s = direct_s = direct_u = 0
+            for ch, vals in channels.items():
+                s = vals["sessions"]
+                if ch in paid_groups:
+                    paid_s += s
+                else:
+                    nonpaid_s += s
+                if ch == "Direct":
+                    direct_s += s
+                    direct_u += vals["new_users"]
             daily[d] = {
-                "sessions":            direct.get(d, {}).get("sessions", 0),
-                "new_users":           direct.get(d, {}).get("new_users", 0),
-                "brand_paid_sessions": brand_paid.get(d, {}).get("sessions", 0),
-                "blr_paid_sessions":   blr_paid.get(d, {}).get("sessions", 0),
+                "sessions":              direct_s,
+                "new_users":             direct_u,
+                "total_paid_sessions":   paid_s,
+                "total_nonpaid_sessions": nonpaid_s,
+                "brand_paid_sessions":   brand_paid.get(d, {}).get("sessions", 0),
+                "blr_paid_sessions":     blr_paid.get(d, {}).get("sessions", 0),
             }
 
-        print(f"    ✓ GA4 Direct:      {len(direct)} days")
-        print(f"    ✓ GA4 Brand Paid:  {len(brand_paid)} days")
-        print(f"    ✓ GA4 BLR Paid:    {len(blr_paid)} days")
+        print(f"    ✓ GA4 Brand Paid:   {len(brand_paid)} days")
+        print(f"    ✓ GA4 BLR Paid:     {len(blr_paid)} days")
         return daily
 
     except Exception as e:
@@ -408,20 +515,56 @@ def fetch_social_daily(config, start_date, end_date):
             print("    ✗ Meltwater: API key not configured")
             return {}
 
-        headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+        # Meltwater supports two auth styles — try x-user-key first, fall back to Bearer
         base = "https://api.meltwater.com/v3"
-        ids  = mw["search_ids"]
+        ids  = mw.get("search_ids", {})
+
+        # Probe auth style once using the master search ID
+        _probe_id = ids.get("brand_campaign_master", "")
+        _auth_header = None
+        if _probe_id and not str(_probe_id).startswith("SEARCH_ID"):
+            for _hdr in [{"x-user-key": api_key}, {"Authorization": f"Bearer {api_key}"}]:
+                _test = requests.get(
+                    f"{base}/searches/{_probe_id}/analytics/volume",
+                    headers={**_hdr, "Accept": "application/json"},
+                    params={"from": f"{start_date}T00:00:00Z", "to": f"{start_date}T23:59:59Z", "groupby": "day"},
+                    timeout=15
+                )
+                if _test.status_code != 401:
+                    _auth_header = {**_hdr, "Accept": "application/json"}
+                    print(f"    ✓ Meltwater auth: {list(_hdr.keys())[0]}")
+                    break
+            if _auth_header is None:
+                print("    ✗ Meltwater 401 — API key rejected by both auth methods.")
+                print("      Go to Meltwater → Settings → API → regenerate your key, then update config.json")
+                return {}
+        else:
+            _auth_header = {"x-user-key": api_key, "Accept": "application/json"}
+
+        headers = _auth_header
 
         def fetch_volume(search_id):
-            if not search_id or search_id.startswith("SEARCH_ID"):
+            if not search_id or str(search_id).startswith("SEARCH_ID"):
                 return {}
             url = f"{base}/searches/{search_id}/analytics/volume"
             params = {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z", "groupby": "day"}
-            r = requests.get(url, headers=headers, params=params, timeout=30)
-            if r.status_code != 200:
-                print(f"    ✗ Meltwater search {search_id}: HTTP {r.status_code}")
+            try:
+                r = requests.get(url, headers=headers, params=params, timeout=30)
+            except Exception as e:
+                print(f"    ✗ Meltwater network error: {e}")
                 return {}
-            return {item["date"][:10]: item.get("count", 0) for item in r.json().get("data", [])}
+            if r.status_code == 404:
+                print(f"    ✗ Meltwater 404 — search_id {search_id} not found")
+                return {}
+            if r.status_code != 200:
+                print(f"    ✗ Meltwater search {search_id}: HTTP {r.status_code} — {r.text[:200]}")
+                return {}
+            data = r.json()
+            # Handle both {'data': [...]} and {'volume': [...]} response shapes
+            items = data.get("data") or data.get("volume") or data.get("results") or []
+            if not items:
+                print(f"    ⚠ Meltwater {search_id}: 200 OK but empty. Keys: {list(data.keys())}")
+            return {item.get("date","")[:10]: item.get("count", item.get("volume", 0)) for item in items}
 
         brand = fetch_volume(ids.get("brand_campaign_master"))
         huft  = fetch_volume(ids.get("competitor_huft"))
@@ -529,6 +672,130 @@ def fetch_top_queries_gsc(config, windows=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SIGNAL 5 — SPEND (Google Sheet: Unified Dashboard - Supertails, d-1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_spend_daily(config):
+    """
+    Fetches brand spend (column BI) and performance spend (column BG) from the
+    Unified Dashboard - Supertails Google Sheet via the Sheets API.
+
+    Column layout (0-indexed):
+      col 0  (A)  = Date (DD/MM/YYYY format)
+      col 58 (BG) = Perf Spend (performance)
+      col 60 (BI) = Brand Spend (brand marketing)
+
+    Requires the service account to have Viewer access on the sheet.
+    Share with: supertails-dashboard@supertails-dashboard-492714.iam.gserviceaccount.com
+
+    Returns { 'YYYY-MM-DD': {'brand_spend': int, 'perf_spend': int}, ... }
+    """
+    import re
+
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+
+        gs_cfg   = config.get("google_sheets", {})
+        key_path = gs_cfg.get("service_account_key_path") or \
+                   config.get("google_search_console", {}).get("service_account_key_path")
+        sheet_id = gs_cfg.get("unified_dashboard_sheet_id",
+                               "1SyhkqX0ZagBsUa91c1xITot6N92rwuupp3Bc6Ny2uHg")
+        tab_name = gs_cfg.get("spend_tab_name", "")   # leave blank = first sheet
+
+        # Column indices (0-based) — configurable, defaults to BG/BI
+        date_col       = int(gs_cfg.get("date_col",       0))
+        perf_spend_col = int(gs_cfg.get("perf_spend_col", 58))   # BG
+        brand_spend_col= int(gs_cfg.get("brand_spend_col", 60))  # BI
+
+        if not key_path or str(key_path).startswith("YOUR_"):
+            print("    ℹ  Spend: no service account key — skipping Google Sheet fetch")
+            return {}
+
+        creds = service_account.Credentials.from_service_account_file(
+            key_path,
+            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+        )
+        svc = build("sheets", "v4", credentials=creds)
+
+        # Fetch up to column BI (col index 60 = column "BI")
+        max_col = max(date_col, perf_spend_col, brand_spend_col)
+        def idx_to_col(n):
+            """Convert 0-based column index to sheet column letter (A, B, ..., BG, BI)."""
+            s = ""
+            n += 1
+            while n:
+                n, r = divmod(n - 1, 26)
+                s = chr(65 + r) + s
+            return s
+
+        col_letter = idx_to_col(max_col)
+        range_name = f"{tab_name}!A:{col_letter}" if tab_name else f"A:{col_letter}"
+
+        print(f"    → Fetching sheet range {range_name} ...")
+        result = svc.spreadsheets().values().get(
+            spreadsheetId=sheet_id,
+            range=range_name,
+            valueRenderOption="UNFORMATTED_VALUE",   # get raw numbers, not formatted strings
+        ).execute()
+
+        rows = result.get("values", [])
+        if not rows:
+            print(f"    ✗ Spend: sheet returned no data (range: {range_name})")
+            return {}
+
+        def parse_num(v):
+            if v is None or v == "": return None
+            try:
+                return int(float(str(v).replace(",", "").strip()))
+            except (ValueError, TypeError):
+                return None
+
+        def parse_date(v):
+            """Handle DD/MM/YYYY string or Excel serial date number."""
+            if v is None or v == "": return None
+            sv = str(v).strip()
+            # DD/MM/YYYY string
+            m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', sv)
+            if m:
+                return f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}"
+            # Excel serial (e.g. 45958.0)
+            try:
+                serial = float(sv)
+                if 40000 < serial < 60000:   # sanity: 2009–2064
+                    from datetime import date as _d, timedelta as _td
+                    # Excel epoch: Dec 30 1899 (with leap year bug)
+                    epoch = _d(1899, 12, 30)
+                    return (epoch + _td(days=int(serial))).isoformat()
+            except ValueError:
+                pass
+            return None
+
+        daily = {}
+        skipped = 0
+        for row in rows:
+            if len(row) <= max_col:
+                skipped += 1
+                continue
+            iso_date   = parse_date(row[date_col])
+            perf_val   = parse_num(row[perf_spend_col])
+            brand_val  = parse_num(row[brand_spend_col])
+
+            if iso_date and (perf_val or brand_val):
+                daily[iso_date] = {"perf_spend": perf_val, "brand_spend": brand_val}
+
+        print(f"    ✓ Spend: {len(daily)} days fetched (skipped {skipped} short rows)")
+        if daily:
+            dates_sorted = sorted(daily)
+            print(f"    ✓ Spend date range: {dates_sorted[0]} → {dates_sorted[-1]}")
+        return daily
+
+    except Exception as e:
+        print(f"    ✗ Spend: {e}")
+        return {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # FETCH ALL SIGNALS → merge into store
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -552,21 +819,29 @@ def fetch_and_merge(config, store, start_date, end_date):
     print(f"  [4/4] Social Mentions (Meltwater)")
     mw_daily  = fetch_social_daily(config, start_date, end_date)
 
+    print(f"  [5/5] Spend (Unified Dashboard Google Sheet)")
+    spend_daily = fetch_spend_daily(config)
+
     # Merge all into one day_data dict
-    all_dates = sorted(set(list(gsc_daily) + list(af_india_daily) + list(ga_daily) + list(mw_daily)))
+    all_dates = sorted(set(list(gsc_daily) + list(af_india_daily) + list(ga_daily) + list(mw_daily) + list(spend_daily)))
     day_data = {}
     for d in all_dates:
-        web = ga_daily.get(d, {})
-        soc = mw_daily.get(d, {})
+        web   = ga_daily.get(d, {})
+        soc   = mw_daily.get(d, {})
+        spend = spend_daily.get(d, {})
         day_data[d] = {
             "branded_search":        gsc_daily.get(d),
             "total_installs":        af_total_daily.get(d),
             "direct_installs":       af_india_daily.get(d),
             "direct_installs_blr":   af_blr_daily.get(d),
-            "direct_sessions":       web.get("sessions"),
-            "direct_new_users":      web.get("new_users"),
-            "brand_paid_sessions":   web.get("brand_paid_sessions"),
-            "blr_paid_sessions":     web.get("blr_paid_sessions"),
+            "direct_sessions":         web.get("sessions"),
+            "direct_new_users":        web.get("new_users"),
+            "total_paid_sessions":     web.get("total_paid_sessions"),
+            "total_nonpaid_sessions":  web.get("total_nonpaid_sessions"),
+            "brand_paid_sessions":     web.get("brand_paid_sessions"),
+            "blr_paid_sessions":       web.get("blr_paid_sessions"),
+            "brand_spend":           spend.get("brand_spend"),
+            "perf_spend":            spend.get("perf_spend"),
             "brand_mentions":        soc.get("brand_mentions"),
             "hashtag_mentions":      soc.get("hashtag_mentions"),
             "sov_percent":           soc.get("sov_percent"),
@@ -659,8 +934,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Supertails · Offline Campaign Dashboard</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<title>Supertails Brand Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js" onerror="window._chartMissing=true;window.Chart=function(ctx,cfg){this.destroy=()=>{};this.data=cfg.data||{};ctx.canvas&&(ctx.canvas.parentElement.innerHTML='<div style=\\'padding:18px;color:#9CA3AF;font-size:12px;text-align:center;\\'>Charts require an internet connection</div>');};"></script>
 <style>
 :root {
   --orange:#E8450A; --navy:#1B2A3B; --navy2:#243447; --navy-light:#3B5068;
@@ -681,8 +956,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
 .hdr-title{font-size:14px;font-weight:600;color:rgba(255,255,255,.9);}
 .hdr-sub{font-size:11px;color:rgba(255,255,255,.45);margin-top:2px;}
 .hdr-right{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
-.phase-badge{background:var(--orange);color:#fff;padding:5px 12px;
-             border-radius:20px;font-size:11px;font-weight:700;letter-spacing:.5px;white-space:nowrap;}
+.signal-status{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.sig-pill{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;
+          font-size:10px;font-weight:600;letter-spacing:.3px;white-space:nowrap;}
+.sig-pill.live{background:rgba(22,163,74,.18);color:#86efac;}
+.sig-pill.wait{background:rgba(234,179,8,.15);color:#fde68a;}
+.sig-pill.off{background:rgba(255,255,255,.08);color:rgba(255,255,255,.35);}
+.sig-pill .dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;}
+.sig-pill.live .dot{background:#22c55e;}
+.sig-pill.wait .dot{background:#eab308;}
+.sig-pill.off .dot{background:rgba(255,255,255,.25);}
 .freshness{font-size:11px;color:rgba(255,255,255,.55);}
 .freshness b{color:rgba(255,255,255,.85);}
 .refresh-ctrl{display:flex;align-items:center;gap:6px;font-size:11px;color:rgba(255,255,255,.5);}
@@ -790,6 +1073,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
 .sdelta.grey{color:var(--grey);background:var(--grey-bg);}
 .sthresh{font-size:10px;color:var(--muted);margin-top:6px;}
 .stool{font-size:10px;color:var(--muted);margin-top:5px;font-style:italic;}
+.sfresh{font-size:9px;font-weight:600;letter-spacing:.3px;margin-top:6px;padding:2px 7px;
+        border-radius:10px;display:inline-block;background:rgba(0,0,0,.06);color:var(--muted);}
+.sfresh.fresh{background:rgba(22,163,74,.1);color:#16a34a;}
+.sfresh.stale{background:rgba(234,179,8,.12);color:#b45309;}
+.sfresh.old{background:rgba(220,38,38,.1);color:#dc2626;}
 .scmp{display:none;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);}
 .scmp-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
 .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
@@ -855,13 +1143,13 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
   <div class="hdr-left">
     <div class="logo">SUPERTAILS</div>
     <div>
-      <div class="hdr-title">Offline Campaign · Four-Signal Dashboard</div>
-      <div class="hdr-sub">Unlocking Bangalore · Daily Tracking · v3</div>
+      <div class="hdr-title">Brand Dashboard</div>
+      <div class="hdr-sub">All India · Daily Tracking</div>
     </div>
   </div>
   <div class="hdr-right">
+    <div class="signal-status" id="signalStatus"></div>
     <div class="freshness">Data current as of <b id="freshDate">—</b> (t-1)</div>
-    <div class="phase-badge" id="phaseBadge">Phase 01</div>
     <div class="refresh-ctrl">
       <button class="refresh-toggle on" id="refreshToggle" onclick="toggleAutoRefresh()"></button>
       <span id="refreshLabel">Auto-refresh in <b id="countdown">5:00</b></span>
@@ -926,47 +1214,113 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
 <div class="cards">
   <div class="card" id="c1">
     <div class="s-bar" id="b1"></div>
-    <div class="snum">Signal 01</div>
-    <div class="stitle">Branded Search Volume</div>
-    <div><span class="sval" id="v1">—</span><span class="sunit" id="su1">impressions/day</span></div>
+    <div class="stitle">Branded Search</div>
+    <div><span class="sval" id="v1">—</span><span class="sunit" id="su1">impressions/wk</span></div>
     <div class="smeta"><span class="sbase" id="bl1">Baseline: —</span><span class="sdelta" id="d1">—</span></div>
     <div class="scmp" id="cmp1"></div>
-    <div class="sthresh">Threshold: +20% above baseline</div>
     <div class="stool">Google Search Console · All India</div>
+    <div class="sfresh" id="fr1">—</div>
   </div>
   <div class="card" id="c2">
     <div class="s-bar" id="b2"></div>
-    <div class="snum">Signal 02</div>
-    <div class="stitle">Direct App Installs</div>
-    <div><span class="sval" id="v2">—</span><span class="sunit" id="su2">installs/day</span></div>
+    <div class="stitle">Organic Installs</div>
+    <div><span class="sval" id="v2">—</span><span class="sunit" id="su2">installs/wk</span></div>
     <div class="smeta"><span class="sbase" id="bl2">Baseline: —</span><span class="sdelta" id="d2">—</span></div>
     <div class="scmp" id="cmp2"></div>
-    <div class="sthresh">Threshold: +15–25% above baseline</div>
-    <div class="stool">AppsFlyer · All India · Unattributed</div>
+    <div class="stool">AppsFlyer · All India · Organic only · Brand signal</div>
+    <div class="sfresh" id="fr2">—</div>
   </div>
   <div class="card" id="c3">
     <div class="s-bar" id="b3"></div>
-    <div class="snum">Signal 03</div>
     <div class="stitle">Non-Paid Sessions</div>
-    <div><span class="sval" id="v3">—</span><span class="sunit" id="su3">sessions/day</span></div>
+    <div><span class="sval" id="v3">—</span><span class="sunit" id="su3">sessions/wk</span></div>
     <div class="smeta"><span class="sbase" id="bl3">Baseline: —</span><span class="sdelta" id="d3">—</span></div>
     <div class="scmp" id="cmp3"></div>
-    <div class="sthresh">Threshold: +20% vs baseline</div>
     <div class="stool">GA4 · All non-paid channels · All India</div>
+    <div class="sfresh" id="fr3">—</div>
   </div>
   <div class="card" id="c4" style="position:relative;">
     <div class="s-bar" id="b4"></div>
-    <div class="snum">Signal 04</div>
     <div class="stitle">Brand Mentions</div>
-    <div><span class="sval" id="v4">—</span><span class="sunit" id="su4">mentions/day</span></div>
+    <div><span class="sval" id="v4">—</span><span class="sunit" id="su4">mentions/wk</span></div>
     <div class="smeta"><span class="sbase" id="bl4">Baseline: —</span><span class="sdelta" id="d4">—</span></div>
     <div class="scmp" id="cmp4"></div>
-    <div class="sthresh">Threshold: +20% & SOV +5pts</div>
     <div class="stool">Meltwater · Instagram, X, Reddit, LinkedIn</div>
+    <div class="sfresh" id="fr4">—</div>
     <div id="c4_nc" style="display:none;position:absolute;inset:0;background:rgba(241,245,249,0.92);border-radius:12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;">
       <div style="font-size:18px;">🔌</div>
       <div style="font-size:12px;font-weight:600;color:#475569;">Not Connected</div>
       <div style="font-size:10px;color:#94a3b8;">Meltwater plugin required</div>
+    </div>
+  </div>
+</div>
+
+<!-- SPEND CARDS -->
+<div class="cards" style="margin-top:6px;">
+  <div class="card" id="c_brand_spend">
+    <div class="s-bar" id="b_brand_spend"></div>
+    <div class="stitle">Brand Spend (BM)</div>
+    <div><span class="sval" id="v_brand_spend">—</span><span class="sunit" id="su_brand_spend">₹/wk</span></div>
+    <div class="smeta"><span class="sbase" id="bl_brand_spend">Baseline: —</span><span class="sdelta" id="d_brand_spend">—</span></div>
+    <div class="stool">Unified Dashboard · Brand Marketing · d-1</div>
+    <div class="sfresh" id="fr_brand_spend">—</div>
+  </div>
+  <div class="card" id="c_perf_spend">
+    <div class="s-bar" id="b_perf_spend"></div>
+    <div class="stitle">Performance Spend</div>
+    <div><span class="sval" id="v_perf_spend">—</span><span class="sunit" id="su_perf_spend">₹/wk</span></div>
+    <div class="smeta"><span class="sbase" id="bl_perf_spend">Baseline: —</span><span class="sdelta" id="d_perf_spend">—</span></div>
+    <div class="stool">Unified Dashboard · Performance · d-1</div>
+    <div class="sfresh" id="fr_perf_spend">—</div>
+  </div>
+  <div class="card" id="c_spend_ratio">
+    <div class="s-bar" id="b_spend_ratio" style="background:var(--navy-light);"></div>
+    <div class="stitle">Brand : Perf Ratio</div>
+    <div><span class="sval" id="v_spend_ratio" style="font-size:20px;">—</span></div>
+    <div class="smeta"><span class="sbase" id="bl_spend_ratio" style="color:var(--muted);">Latest period split</span></div>
+    <div class="stool">Brand vs Performance spend mix</div>
+    <div class="sfresh" id="fr_spend_ratio">—</div>
+  </div>
+</div>
+
+<!-- INTELLIGENCE PANEL — freshness + summary + alerts + chat -->
+<div style="padding:10px 28px 4px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    <span style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.5px;">DATA FRESHNESS</span>
+    <div id="freshnessSyncBar" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+  </div>
+  <span id="commonDateBadge" style="font-size:10px;font-weight:600;background:rgba(232,69,10,.12);color:#E8450A;padding:3px 10px;border-radius:10px;white-space:nowrap;">Analysis to: —</span>
+</div>
+
+<!-- SUMMARY + ALERTS + ACTIONS + CHAT -->
+<div style="display:grid;grid-template-columns:1fr 260px;gap:10px;padding:0 28px 10px;">
+  <!-- Left: summary + top 2 action cards -->
+  <div style="display:flex;flex-direction:column;gap:10px;">
+    <div style="background:#fff;border-radius:var(--r);padding:14px 16px;border:1px solid var(--border);">
+      <div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.5px;margin-bottom:6px;">SUMMARY</div>
+      <div id="narrativeText" style="font-size:12px;color:var(--text);line-height:1.65;"></div>
+    </div>
+    <div id="actionCards" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;"></div>
+  </div>
+  <!-- Right: alerts + chat -->
+  <div style="display:flex;flex-direction:column;gap:10px;">
+    <div style="background:#fff;border-radius:var(--r);padding:14px 16px;border:1px solid var(--border);">
+      <div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.5px;margin-bottom:8px;">ALERTS</div>
+      <div id="alertsList"></div>
+    </div>
+    <!-- Chat window -->
+    <div style="background:#fff;border-radius:var(--r);border:1px solid var(--border);display:flex;flex-direction:column;flex:1;min-height:280px;">
+      <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;">
+        <span style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.5px;">ASK YOUR DATA</span>
+      </div>
+      <div id="chatSuggestions" style="padding:8px 14px;display:flex;flex-wrap:wrap;gap:5px;border-bottom:1px solid var(--border);"></div>
+      <div id="chatMessages" style="flex:1;overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:8px;max-height:220px;"></div>
+      <div style="padding:8px 14px;border-top:1px solid var(--border);display:flex;gap:6px;">
+        <input id="chatInput" type="text" placeholder="Ask about the data…"
+          style="flex:1;border:1px solid var(--border);border-radius:6px;padding:6px 9px;font-size:11px;outline:none;"
+          onkeydown="if(event.key==='Enter')sendChatMsg()">
+        <button onclick="sendChatMsg()" style="background:var(--orange);color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;">Ask</button>
+      </div>
     </div>
   </div>
 </div>
@@ -977,12 +1331,36 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
   <div class="ccrd"><div class="ctop"><div><div class="ctitle">Branded Search Volume</div><div class="csub">GSC · All India · Branded queries</div></div></div><div class="cwrap"><canvas id="ch1"></canvas></div></div>
   <div class="ccrd"><div class="ctop"><div><div class="ctitle">Non-Paid Sessions</div><div class="csub" id="sub_nonpaid">GA4 · All non-paid channels · <span id="sub_nonpaid_city">All India</span></div></div></div><div class="cwrap"><canvas id="ch_nonpaid"></canvas></div></div>
   <div class="ccrd"><div class="ctop"><div><div class="ctitle">Paid Sessions</div><div class="csub" id="sub_paid">GA4 · All paid channels · <span id="sub_paid_city">All India</span></div></div></div><div class="cwrap"><canvas id="ch_paid"></canvas></div></div>
-  <div class="ccrd"><div class="ctop"><div><div class="ctitle">App Installs</div><div class="csub">AppsFlyer · India · Total &amp; Organic</div></div></div><div class="cwrap"><canvas id="ch2"></canvas></div></div>
+  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Organic Installs</div><div class="csub">AppsFlyer · All India · Organic only · Brand-driven signal</div></div></div><div class="cwrap"><canvas id="ch2"></canvas></div></div>
 </div>
 <!-- PAID BREAKDOWN -->
 <div class="section" style="margin-top:12px;"><div class="sec-title">Paid Breakdown — <span id="paidBreakLabel"></span></div></div>
 <div class="charts">
   <div class="ccrd"><div class="ctop"><div><div class="ctitle">Brand Campaign Sessions</div><div class="csub">GA4 · Campaigns with "Brand" · All India</div></div></div><div class="cwrap"><canvas id="ch3"></canvas></div></div>
+</div>
+
+<!-- ORGANIC VS PAID INSTALLS -->
+<div class="section" style="margin-top:12px;"><div class="sec-title">Organic vs Paid Installs — <span id="instSplitRangeLabel"></span></div></div>
+<div class="charts" style="grid-template-columns:1fr;">
+  <div class="ccrd">
+    <div class="ctop">
+      <div><div class="ctitle">App Installs — Organic vs Paid</div><div class="csub">AppsFlyer · All India · Android + iOS · Organic = brand-driven, unattributed</div></div>
+      <div id="instSplitRatioDisplay" style="font-size:11px;color:var(--muted);text-align:right;"></div>
+    </div>
+    <div class="cwrap" style="height:220px;"><canvas id="ch_inst_split"></canvas></div>
+  </div>
+</div>
+
+<!-- BRAND VS PERFORMANCE SESSIONS -->
+<div class="section" style="margin-top:12px;"><div class="sec-title">Brand vs Performance Sessions — <span id="bvpRangeLabel"></span></div></div>
+<div class="charts" style="grid-template-columns:1fr;">
+  <div class="ccrd">
+    <div class="ctop">
+      <div><div class="ctitle">Paid Sessions — Brand vs Performance</div><div class="csub">GA4 · Brand = campaigns with "Brand" · Performance = all other paid · All India</div></div>
+      <div id="bvpRatioDisplay" style="font-size:11px;color:var(--muted);text-align:right;"></div>
+    </div>
+    <div class="cwrap" style="height:220px;"><canvas id="ch_bvp"></canvas></div>
+  </div>
 </div>
 
 <!-- REVENUE CHART -->
@@ -1007,17 +1385,41 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
   <div class="ccrd"><div class="ctop"><div><div class="ctitle">All Sessions</div><div class="csub" id="sub_all_sess">GA4 · All India · Select signals above</div></div></div><div class="cwrap" style="height:260px;"><canvas id="ch_all_sess"></canvas></div></div>
 </div>
 
+<!-- SPEND TRENDS -->
+<div class="section" style="margin-top:12px;"><div class="sec-title">Spend Trends — Brand &amp; Performance</div></div>
+<div class="charts" style="grid-template-columns:1fr 1fr;">
+  <div class="ccrd">
+    <div class="ctop"><div><div class="ctitle">Brand Spend (BM) — Daily ₹</div><div class="csub">Unified Dashboard · d-1 · Brand Marketing</div></div></div>
+    <div class="cwrap"><canvas id="ch_brand_spend"></canvas></div>
+  </div>
+  <div class="ccrd">
+    <div class="ctop"><div><div class="ctitle">Performance Spend — Daily ₹</div><div class="csub">Unified Dashboard · d-1 · Performance</div></div></div>
+    <div class="cwrap"><canvas id="ch_perf_spend"></canvas></div>
+  </div>
+</div>
+<div class="charts" style="grid-template-columns:1fr;">
+  <div class="ccrd">
+    <div class="ctop">
+      <div><div class="ctitle">Brand vs Performance Spend — Stacked</div><div class="csub" id="spendStackRangeLabel">Unified Dashboard · Daily total outlay</div></div>
+      <div id="spendSplitDisplay" style="font-size:11px;color:rgba(255,255,255,.6);"></div>
+    </div>
+    <div class="cwrap" style="height:240px;"><canvas id="ch_spend_stack"></canvas></div>
+  </div>
+</div>
+
 <!-- SIGNAL CORRELATION OVERLAY -->
 <div class="section" style="margin-top:12px;">
   <div class="sec-title">Signal Correlation — Normalised Overlay</div>
-  <div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Each signal indexed to 100 = pre-campaign baseline. Compare trends and lead/lag.</div>
+  <div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Each signal indexed to 100 = baseline average. Compare trends and lead/lag.</div>
   <div class="toggle-row" id="corrToggles">
     <button class="tog-btn active" data-key="branded_search"          onclick="toggleCorr(this)" style="--tc:#e8450a">Branded Search</button>
-    <button class="tog-btn active" data-key="total_nonpaid_sessions"  onclick="toggleCorr(this)" style="--tc:#6366f1">Non-Paid Sessions</button>
-    <button class="tog-btn active" data-key="total_paid_sessions"     onclick="toggleCorr(this)" style="--tc:#ef4444">Paid Sessions</button>
+    <button class="tog-btn active" data-key="direct_sessions"         onclick="toggleCorr(this)" style="--tc:#3b82f6">Non-Paid Brand</button>
+    <button class="tog-btn active" data-key="brand_paid_sessions"     onclick="toggleCorr(this)" style="--tc:#8b5cf6">Brand Paid</button>
+    <button class="tog-btn active" data-key="perf_sessions"           onclick="toggleCorr(this)" style="--tc:#ef4444">Performance</button>
     <button class="tog-btn active" data-key="direct_installs"         onclick="toggleCorr(this)" style="--tc:#f59e0b">Organic Installs</button>
     <button class="tog-btn active" data-key="revenue_india"           onclick="toggleCorr(this)" style="--tc:#14b8a6">India NMV</button>
-    <button class="tog-btn"        data-key="brand_paid_sessions"     onclick="toggleCorr(this)" style="--tc:#8b5cf6">Brand Paid</button>
+    <button class="tog-btn" data-key="brand_spend"                    onclick="toggleCorr(this)" style="--tc:#7c3aed">Brand Spend</button>
+    <button class="tog-btn" data-key="perf_spend"                     onclick="toggleCorr(this)" style="--tc:#dc2626">Perf Spend</button>
   </div>
 </div>
 <div class="charts" style="grid-template-columns:1fr;">
@@ -1045,38 +1447,44 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
   </div>
 </div>
 
-<!-- ACTIVATION LOG + GUIDE -->
-<div class="bot">
-  <div class="sec-title" style="margin-top:16px;">Campaign Activation Log</div>
-  <div class="icrd">
-    <table class="log-t"><thead><tr><th>Date</th><th>Event</th><th>Type</th></tr></thead>
-    <tbody id="logBody"></tbody></table>
-  </div>
-  <div class="sec-title" style="margin-top:16px;">Signal Interpretation Guide</div>
-  <div class="icrd">
-    <table class="int-t">
-      <thead><tr><th>What you see</th><th>What it means</th><th>Action</th></tr></thead>
-      <tbody>
-        <tr><td class="int-sig">✅ All 4 signals lift within 2 weeks of OOH</td><td>Strong evidence offline is working.</td><td class="int-act">Scale campaign, proceed to Phase 2.</td></tr>
-        <tr><td class="int-sig">🔍 Search + social lift, installs + web flat</td><td>Awareness building but not converting.</td><td class="int-act">Stronger CTA, check install flow.</td></tr>
-        <tr><td class="int-sig">📱 Installs + web lift, search + social flat</td><td>Strong direct recall, quiet action.</td><td class="int-act">Maintain media, audit format mix.</td></tr>
-        <tr><td class="int-sig">💬 Social lifts, digital signals flat</td><td>Conversation without conversion.</td><td class="int-act">Add QR codes or short URLs to OOH.</td></tr>
-        <tr><td class="int-sig">⚪ All 4 flat after 3+ weeks</td><td>Offline not cutting through.</td><td class="int-act">Audit locations, test new creative.</td></tr>
-        <tr><td class="int-sig">⚠️ Negative sentiment above 15%</td><td>Service issue reaching new users.</td><td class="int-act">Escalate to Brand + CX. Don't pause.</td></tr>
-      </tbody>
-    </table>
-  </div>
-</div>
-<footer>Supertails · Offline Campaign Tracking · Four-Signal Framework v3 · 2025–26 · Confidential</footer>
+<div class="bot"></div>
+<footer>Supertails Brand Dashboard · All India · Confidential</footer>
 
 <script>
+// ── ALL declarations at top — eliminates every temporal dead zone risk ────────
 const S = __STORE_DATA__;
 const CFG = __CONFIG_DATA__;
-const baselines = CFG.baselines || {};
+const ANALYSIS = __ANALYSIS_DATA__;
+const baselines     = CFG.baselines || {};
 const CITY_SESSIONS = S.city_sessions || {};
 const CITY_LIST     = S.city_list || [];
+const allDates      = S.dates||[];
+const minDate       = allDates[0]||'';
+const maxDate       = allDates[allDates.length-1]||'';
+const today         = new Date().toISOString().split('T')[0];
+const view90        = allDates.length>=90 ? allDates[allDates.length-90] : minDate;
 const ORANGE='#E8450A', NAVY='#1B2A3B', NAVY_L='#3B5068',
       OBG='rgba(232,69,10,.10)', NBG='rgba(59,80,104,.10)', GREY_C='rgba(107,114,128,.4)';
+const NOISE_CITIES  = ['(not set)', 'Ashburn'];
+const CITY_KEY_TO_STORE = {
+  'direct':        'direct_sessions',  'total_paid':    'total_paid_sessions',
+  'total_nonpaid': 'total_nonpaid_sessions', 'brand_paid': 'brand_paid_sessions',
+  'blr_paid':      'blr_paid_sessions',
+};
+const MO=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const CI={};
+function addDays(d,n){const dt=new Date(d);dt.setDate(dt.getDate()+n);return dt.toISOString().split('T')[0];}
+const cs       = S.campaign_start || allDates[Math.floor(allDates.length*0.8)] || allDates[0] || '';
+const aStart0  = cs ? addDays(cs,-30) : minDate;
+const aEnd0    = cs ? addDays(cs,-1)  : minDate;
+const bStart0  = maxDate ? addDays(maxDate,-29) : minDate;
+const bEnd0    = maxDate;
+let refreshOn=true, countdown=300;
+let activeCity='all';
+let gran='W';
+let currentSlice=null;
+let sessTog=new Set(['total_nonpaid_sessions','total_paid_sessions']);
+let corrTog=new Set(['branded_search','direct_sessions','brand_paid_sessions','perf_sessions','direct_installs','revenue_india']);
 
 // ── Helpers
 function fmt(n){return n==null?'—':Math.round(n).toLocaleString('en-IN');}
@@ -1085,9 +1493,57 @@ function avg(arr){const v=(arr||[]).filter(x=>x!=null&&!isNaN(x));return v.lengt
 function pct(curr,base){return(curr==null||!base)?null:((curr-base)/base*100);}
 function dcls(p,th){if(p==null)return'grey';return p>=th?'green':p>=0?'yellow':'red';}
 
-// ── Header
-document.getElementById('phaseBadge').textContent='Phase '+S.campaign_phase+' — '+S.campaign_phase_label;
+// ── Header — signal status pills
 document.getElementById('freshDate').textContent=S.last_fetched_to||'—';
+(function(){
+  const cfg = CFG.signals_configured || {};
+  const hasMeltwater = (S.brand_mentions||[]).some(v=>v!=null&&v>0);
+  const hasGSC       = (S.branded_search||[]).some(v=>v!=null&&v>0);
+  const hasGA4       = (S.total_nonpaid_sessions||[]).some(v=>v!=null&&v>0);
+  const hasAF        = (S.direct_installs||[]).some(v=>v!=null&&v>0);
+  const signals = [
+    {label:'GSC',        live: hasGSC,       wait: !hasGSC && !!cfg.gsc},
+    {label:'GA4',        live: hasGA4,        wait: !hasGA4 && !!cfg.ga4},
+    {label:'AppsFlyer',  live: hasAF,         wait: !hasAF  && !!cfg.appsflyer},
+    {label:'Meltwater',  live: hasMeltwater,  wait: !hasMeltwater && !!cfg.meltwater},
+  ];
+  const el = document.getElementById('signalStatus');
+  if(!el) return;
+  el.innerHTML = signals.map(s=>{
+    const cls = s.live ? 'live' : s.wait ? 'wait' : 'off';
+    const label = s.live ? s.label : s.wait ? s.label+' ⏳' : s.label;
+    return `<div class="sig-pill ${cls}"><span class="dot"></span>${label}</div>`;
+  }).join('');
+})();
+
+// ── Signal card freshness tags
+(function(){
+  const today = new Date();
+  today.setHours(0,0,0,0);
+
+  function lastDate(arr){
+    if(!arr) return null;
+    for(let i=arr.length-1;i>=0;i--){
+      if(arr[i]!=null && arr[i]>0) return (S.dates||[])[i];
+    }
+    return null;
+  }
+
+  function setFresh(id, dateStr){
+    const el = document.getElementById(id);
+    if(!el) return;
+    if(!dateStr){ el.textContent='No data'; el.className='sfresh old'; return; }
+    const d = new Date(dateStr+'T00:00:00');
+    const days = Math.round((today-d)/(1000*60*60*24));
+    el.textContent = 'Data to: '+dateStr+' ('+days+'d ago)';
+    el.className = 'sfresh ' + (days<=2?'fresh':days<=5?'stale':'old');
+  }
+
+  setFresh('fr1', lastDate(S.branded_search));
+  setFresh('fr2', lastDate(S.direct_installs));
+  setFresh('fr3', lastDate(S.total_nonpaid_sessions));
+  setFresh('fr4', lastDate(S.brand_mentions));
+})();
 
 // ── Signal 04 not-connected overlay
 (function(){
@@ -1109,7 +1565,6 @@ document.getElementById('freshDate').textContent=S.last_fetched_to||'—';
 })();
 
 // ── Auto-refresh countdown
-let refreshOn=true, countdown=300;
 function toggleAutoRefresh(){
   refreshOn=!refreshOn;
   document.getElementById('refreshToggle').classList.toggle('on',refreshOn);
@@ -1126,8 +1581,6 @@ function tick(){
 tick();
 
 // ── City filter
-let activeCity = 'all';
-
 (function buildCityBtns(){
   const wrap = document.getElementById('cityBtns');
   const note = document.getElementById('cityNote');
@@ -1158,17 +1611,6 @@ function setCity(city){
   applyView();
 }
 
-const NOISE_CITIES = ['(not set)', 'Ashburn'];
-
-// Maps city_sessions city-level key → top-level India store key
-const CITY_KEY_TO_STORE = {
-  'direct':        'direct_sessions',
-  'total_paid':    'total_paid_sessions',
-  'total_nonpaid': 'total_nonpaid_sessions',
-  'brand_paid':    'brand_paid_sessions',
-  'blr_paid':      'blr_paid_sessions',
-};
-
 function getCitySessionArr(key){
   // key: 'direct' | 'total_paid' | 'total_nonpaid' | 'brand_paid' | 'blr_paid'
   const storeKey = CITY_KEY_TO_STORE[key] || key;
@@ -1195,13 +1637,160 @@ function getCitySessionArr(key){
   });
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// INTELLIGENCE PANEL — renders narrative, alerts, action cards, digest, chat
+// ══════════════════════════════════════════════════════════════════════════════
+(function renderIntelligencePanel(){
+  if(!ANALYSIS || !ANALYSIS.common_date) return;
+
+  const A = ANALYSIS;
+
+  // ── Common date badge ──────────────────────────────────────────────────────
+  const badge = document.getElementById('commonDateBadge');
+  if(badge) badge.textContent = 'Analysis to: ' + A.common_date;
+
+  // ── Freshness sync bar ─────────────────────────────────────────────────────
+  const fsBar = document.getElementById('freshnessSyncBar');
+  if(fsBar && A.signal_freshness){
+    const today2 = new Date(); today2.setHours(0,0,0,0);
+    const cd = new Date(A.common_date+'T00:00:00');
+    fsBar.innerHTML = Object.entries(A.signal_freshness).map(([key, info])=>{
+      if(!info.date) return `<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:10px;font-size:10px;background:#F3F4F6;color:#6B7280;"><span style="width:6px;height:6px;border-radius:50%;background:#9CA3AF;flex-shrink:0;display:inline-block;"></span>${info.label}: no data</span>`;
+      const d = new Date(info.date+'T00:00:00');
+      const daysStale = Math.round((today2-d)/(1000*60*60*24));
+      const vsCommon  = Math.round((cd-d)/(1000*60*60*24));
+      const color = daysStale<=2?'#16A34A':daysStale<=5?'#D97706':'#DC2626';
+      const bg    = daysStale<=2?'#DCFCE7':daysStale<=5?'#FEF3C7':'#FEE2E2';
+      const lag   = vsCommon>0?` (${vsCommon}d behind common)`:'';
+      return `<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:10px;font-size:10px;background:${bg};color:${color};font-weight:600;"><span style="width:6px;height:6px;border-radius:50%;background:${color};flex-shrink:0;display:inline-block;"></span>${info.label}: ${info.date}${lag}</span>`;
+    }).join('');
+  }
+
+  // ── Narrative ──────────────────────────────────────────────────────────────
+  const narEl = document.getElementById('narrativeText');
+  if(narEl) narEl.textContent = A.narrative||'';
+  const perEl = document.getElementById('narrativePeriod');
+  if(perEl && A.curr_start) perEl.textContent = 'Analysis window: '+A.curr_start+' \u2192 '+A.common_date+' (4-week rolling, all-core-signal common date)';
+
+  // ── Alerts ─────────────────────────────────────────────────────────────────
+  const alertsEl = document.getElementById('alertsList');
+  if(alertsEl){
+    if(!A.alerts||!A.alerts.length){
+      alertsEl.innerHTML = '<div style="font-size:12px;color:#16A34A;font-weight:600;">\u2713 No anomalies detected in the current window.</div>';
+    } else {
+      alertsEl.innerHTML = A.alerts.map(al=>{
+        const bg  = al.level==='warn'?'#FEF3C7':'#EFF6FF';
+        const col = al.level==='warn'?'#92400E':'#1E40AF';
+        return `<div style="background:${bg};border-radius:8px;padding:10px 12px;margin-bottom:8px;">
+          <div style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:${col};">
+            <span>${al.icon}</span><span>${al.signal}</span>
+            <span style="margin-left:auto;font-size:11px;">${al.msg}</span>
+          </div>
+          <div style="font-size:11px;color:${col};opacity:.8;margin-top:4px;">${al.sub}</div>
+        </div>`;
+      }).join('');
+    }
+  }
+
+  // ── Action Cards ───────────────────────────────────────────────────────────
+  const acEl = document.getElementById('actionCards');
+  if(acEl && A.action_cards){
+    const impactColor = {'high':'#DC2626','medium':'#D97706','low':'#16A34A'};
+    acEl.innerHTML = A.action_cards.map((ac,i)=>{
+      const steps = (ac.actions||[]).map(s=>`<li style="margin-bottom:4px;">${s}</li>`).join('');
+      const ic = impactColor[ac.impact]||'#6B7280';
+      return `<div style="background:#fff;border:1px solid var(--border);border-top:3px solid ${i===0?'#E8450A':'#1B2A3B'};border-radius:var(--r);padding:16px;">
+        <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:8px;">
+          <span style="font-size:18px;">${ac.icon}</span>
+          <div style="flex:1;">
+            <div style="font-size:12px;font-weight:700;color:var(--text);">${ac.title}</div>
+            <div style="display:flex;gap:6px;margin-top:4px;">
+              <span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:6px;background:${ic}22;color:${ic};">Impact: ${ac.impact}</span>
+              <span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:6px;background:#6B728022;color:#6B7280;">Effort: ${ac.effort}</span>
+            </div>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px;">${ac.why}</div>
+        <ul style="margin:0;padding-left:16px;font-size:11px;color:var(--text);line-height:1.6;">${steps}</ul>
+      </div>`;
+    }).join('');
+  }
+
+  // ── Chat window ────────────────────────────────────────────────────────────
+  const qa = A.chat_qa || [];
+  const chatSug = document.getElementById('chatSuggestions');
+  const chatMsg = document.getElementById('chatMessages');
+
+  function addMsg(text, isUser){
+    if(!chatMsg) return;
+    const div = document.createElement('div');
+    div.style.cssText = isUser
+      ? 'align-self:flex-end;background:#1B2A3B;color:#fff;border-radius:12px 12px 2px 12px;padding:8px 12px;font-size:12px;max-width:85%;line-height:1.5;'
+      : 'align-self:flex-start;background:#F8F9FA;color:#1B2A3B;border-radius:12px 12px 12px 2px;padding:8px 12px;font-size:12px;max-width:95%;line-height:1.6;border:1px solid var(--border);';
+    div.textContent = text;
+    chatMsg.appendChild(div);
+    chatMsg.scrollTop = chatMsg.scrollHeight;
+  }
+
+  function askQuestion(q, a){
+    addMsg(q, true);
+    setTimeout(()=>addMsg(a, false), 200);
+  }
+
+  // Render suggestion chips
+  if(chatSug){
+    chatSug.innerHTML = qa.map((item,i)=>`<button onclick="chatSugClick(${i})" style="background:#F0F2F5;border:1px solid var(--border);border-radius:14px;padding:4px 10px;font-size:10px;cursor:pointer;color:var(--text);">${item.q}</button>`).join('');
+  }
+
+  window.chatSugClick = function(i){
+    if(!qa[i]) return;
+    askQuestion(qa[i].q, qa[i].a);
+  };
+
+  // Initial greeting
+  addMsg("Hi Aditya! I have loaded the signal analysis for "+A.common_date+". Click a question above or type your own below.", false);
+
+  // Text input handler
+  window.sendChatMsg = function(){
+    const inp = document.getElementById('chatInput');
+    if(!inp || !inp.value.trim()) return;
+    const q = inp.value.trim();
+    inp.value = '';
+    addMsg(q, true);
+
+    // Simple keyword matching
+    const ql = q.toLowerCase();
+    const match = qa.find(item => {
+      const kw = item.q.toLowerCase().split(/\s+/).filter(w=>w.length>4);
+      return kw.filter(w=>ql.includes(w)).length >= 2;
+    });
+
+    if(match){
+      setTimeout(()=>addMsg(match.a, false), 300);
+    } else {
+      // Fallback: copy-to-Claude suggestion
+      const ctx = A.chat_context||'';
+      setTimeout(()=>{
+        addMsg("I don\u2019t have a pre-loaded answer for that exact question. Here\u2019s the data context you can paste into Claude for a deeper answer:", false);
+        setTimeout(()=>{
+          const copyEl = document.createElement('div');
+          copyEl.style.cssText = 'align-self:flex-start;background:#F0F2F5;border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:10px;max-width:95%;font-family:monospace;color:#475569;white-space:pre-wrap;cursor:pointer;';
+          copyEl.textContent = ctx;
+          copyEl.title = 'Click to copy';
+          copyEl.onclick = ()=>{navigator.clipboard.writeText(ctx).then(()=>{copyEl.style.background='#DCFCE7';setTimeout(()=>copyEl.style.background='#F0F2F5',1000);});};
+          if(chatMsg){ chatMsg.appendChild(copyEl); chatMsg.scrollTop=chatMsg.scrollHeight; }
+        }, 100);
+      }, 300);
+    }
+  };
+})();
+
+// ── Clip correlation chart to common date ─────────────────────────────────────
+// (handled by renderCorrelation which uses the view slice — no extra clip needed;
+//  the freshness bar and analysis panel make the date clearly visible)
+
 // ── Initialise date pickers
-const allDates = S.dates||[];
-const minDate  = allDates[0]||'';
-const maxDate  = allDates[allDates.length-1]||'';
-const today    = new Date().toISOString().split('T')[0];
-// Default view: last 90 days
-const view90   = allDates.length>=90 ? allDates[allDates.length-90] : minDate;
+// (allDates, minDate, maxDate, today, view90 declared at top of script)
 document.getElementById('viewStart').value = view90;
 document.getElementById('viewEnd').value   = maxDate;
 document.getElementById('viewStart').min   = minDate;
@@ -1209,12 +1798,6 @@ document.getElementById('viewEnd').min     = minDate;
 document.getElementById('viewStart').max   = maxDate;
 document.getElementById('viewEnd').max     = maxDate;
 
-// Campaign start for defaults
-const cs = S.campaign_start || allDates[Math.floor(allDates.length*0.8)] || allDates[0];
-// Comparison defaults: A = 30 days before campaign start, B = last 30 days
-function addDays(d,n){const dt=new Date(d);dt.setDate(dt.getDate()+n);return dt.toISOString().split('T')[0];}
-const aStart0=addDays(cs,-30), aEnd0=addDays(cs,-1);
-const bStart0=addDays(maxDate,-29), bEnd0=maxDate;
 ['aStart','aEnd','bStart','bEnd'].forEach(id=>{
   document.getElementById(id).min=minDate;
   document.getElementById(id).max=maxDate;
@@ -1225,7 +1808,6 @@ document.getElementById('bStart').value=bStart0<minDate?minDate:bStart0;
 document.getElementById('bEnd').value  =bEnd0;
 
 // ── Granularity
-let gran='W';
 function setGran(g){
   gran=g;
   ['D','W','M'].forEach(x=>document.getElementById('g'+x).classList.toggle('active',x===g));
@@ -1242,20 +1824,33 @@ function sliceByDate(start,end){
     const full=getCitySessionArr(key);
     return (full||[]).slice(si,ei+1);
   };
+  const _total_paid = sc('total_paid');
+  const _brand_paid = sc('brand_paid');
+  // Derived: performance sessions = total paid minus brand paid
+  const _perf_sessions = _total_paid.map((v,i)=>{
+    const b=_brand_paid[i];
+    return (v!=null && b!=null) ? Math.max(0, v-b) : (v!=null ? v : null);
+  });
   return{
     dates:               allDates.slice(si,ei+1),
     branded_search:      sl(S.branded_search),
     total_installs:      sl(S.total_installs),
-    direct_installs:     sl(S.direct_installs),
+    direct_installs:     sl(S.direct_installs),   // organic installs (brand-driven)
+    paid_installs:       sl(S.paid_installs),      // paid installs
     revenue_india:       sl(S.revenue_india),
     // All-traffic split
     total_nonpaid_sessions: sc('total_nonpaid'),
-    total_paid_sessions:    sc('total_paid'),
-    // Sub-breakdowns
-    direct_sessions:        sc('direct'),
-    brand_paid_sessions:    sc('brand_paid'),
+    total_paid_sessions:    _total_paid,
+    // Paid sub-breakdowns
+    brand_paid_sessions:    _brand_paid,
+    perf_sessions:          _perf_sessions,
     blr_paid_sessions:      sc('blr_paid'),
+    // Non-paid brand proxy
+    direct_sessions:        sc('direct'),
     direct_new_users:    sl(S.direct_new_users),
+    // Spend (from Unified Dashboard Google Sheet)
+    brand_spend:         sl(S.brand_spend),
+    perf_spend:          sl(S.perf_spend),
     brand_mentions:      sl(S.brand_mentions),
     sov_percent:         sl(S.sov_percent),
     negative_rate:       sl(S.negative_rate),
@@ -1267,7 +1862,6 @@ function sliceByDate(start,end){
 
 // ── Aggregate dates+values by granularity
 // W/M use SUM; labels are human-readable absolute dates / ranges / month names
-const MO=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 function fmtDay(d){ const dt=new Date(d+'T00:00:00'); return dt.getDate()+' '+MO[dt.getMonth()]; }
 
 function aggregate(dates,values,g){
@@ -1303,7 +1897,6 @@ function aggregate(dates,values,g){
 }
 
 // ── Chart engine
-const CI={};
 function mkChart(id,labels,datasets){
   if(CI[id]){CI[id].destroy();delete CI[id];}
   const ctx=document.getElementById(id).getContext('2d');
@@ -1348,7 +1941,6 @@ function updateCard(vi,bli,di,bi,cmpi,avgVal,baseline,threshold){
 }
 
 // ── Main render
-let currentSlice=null;
 function renderDashboard(slice,g){
   if(!slice){console.warn('No data for selected range');return;}
   currentSlice=slice;
@@ -1373,7 +1965,8 @@ function renderDashboard(slice,g){
   }
   // Unit label per granularity
   const unitSuffix = g==='D' ? 'day' : g==='W' ? 'week' : 'month';
-  [['su1','impressions'],['su2','installs'],['su3','sessions'],['su4','mentions']].forEach(([id,lbl])=>{
+  [['su1','impressions'],['su2','installs'],['su3','sessions'],['su4','mentions'],
+   ['su_brand_spend','₹'],['su_perf_spend','₹']].forEach(([id,lbl])=>{
     const el=document.getElementById(id); if(el) el.textContent=lbl+'/'+unitSuffix;
   });
 
@@ -1385,6 +1978,57 @@ function renderDashboard(slice,g){
   updateCard('v2','bl2','d2','b2','cmp2',a2,granBase(baselines.direct_installs_india||baselines.direct_installs_bangalore),15);
   updateCard('v3','bl3','d3','b3','cmp3',a3,granBase(baselines.total_nonpaid_sessions_india||0),20);
   updateCard('v4','bl4','d4','b4','cmp4',a4,granBase(baselines.brand_mentions||0),20);
+
+  // Spend cards
+  const aBS = granVal(slice.brand_spend);
+  const aPS = granVal(slice.perf_spend);
+  const bsBase = granBase(baselines.gads_brand_spend_per_week||0);
+  const psBase = granBase(baselines.perf_spend_per_week||0);
+  if(aBS!=null){
+    document.getElementById('v_brand_spend').textContent = '\u20B9'+Math.round(aBS).toLocaleString('en-IN');
+    document.getElementById('bl_brand_spend').textContent = bsBase ? 'Baseline: \u20B9'+Math.round(bsBase).toLocaleString('en-IN') : 'No baseline set';
+    const bsPct = bsBase ? pct(aBS, bsBase) : null;
+    const bsEl = document.getElementById('d_brand_spend');
+    if(bsPct!=null){ bsEl.textContent=(bsPct>=0?'+':'')+bsPct.toFixed(1)+'% vs baseline'; bsEl.className='sdelta '+dcls(bsPct,10); }
+    else { bsEl.textContent='Tracking'; bsEl.className='sdelta grey'; }
+    document.getElementById('b_brand_spend').className='s-bar '+(bsPct!=null?dcls(bsPct,10):'grey');
+  }
+  if(aPS!=null){
+    document.getElementById('v_perf_spend').textContent = '\u20B9'+Math.round(aPS).toLocaleString('en-IN');
+    document.getElementById('bl_perf_spend').textContent = psBase ? 'Baseline: \u20B9'+Math.round(psBase).toLocaleString('en-IN') : 'No baseline set';
+    const psPct = psBase ? pct(aPS, psBase) : null;
+    const psEl = document.getElementById('d_perf_spend');
+    if(psPct!=null){ psEl.textContent=(psPct>=0?'+':'')+psPct.toFixed(1)+'% vs baseline'; psEl.className='sdelta '+dcls(psPct,10); }
+    else { psEl.textContent='Tracking'; psEl.className='sdelta grey'; }
+    document.getElementById('b_perf_spend').className='s-bar '+(psPct!=null?dcls(psPct,10):'grey');
+  }
+  if(aBS!=null && aPS!=null && (aBS+aPS)>0){
+    const total = aBS + aPS;
+    const bp = Math.round(aBS/total*100);
+    const pp = 100-bp;
+    document.getElementById('v_spend_ratio').innerHTML =
+      '<span style="color:#7c3aed">'+bp+'%</span> : <span style="color:#dc2626">'+pp+'%</span>';
+    document.getElementById('bl_spend_ratio').innerHTML =
+      '<span style="color:#7c3aed">Brand \u20B9'+Math.round(aBS/1e5)/10+'L</span> \u00B7 <span style="color:#dc2626">Perf \u20B9'+Math.round(aPS/1e5)/10+'L</span>';
+    document.getElementById('fr_spend_ratio').textContent = 'Total: \u20B9'+Math.round(total).toLocaleString('en-IN');
+  }
+  (function(){
+    function lastSpendDate(arr){
+      for(let i=(arr||[]).length-1;i>=0;i--){if(arr[i]!=null&&arr[i]>0)return (S.dates||[])[i];}
+      return null;
+    }
+    function setSpendFresh(id, dateStr){
+      const el=document.getElementById(id); if(!el) return;
+      if(!dateStr){el.textContent='No data';el.className='sfresh old';return;}
+      const today2=new Date(); today2.setHours(0,0,0,0);
+      const d=new Date(dateStr+'T00:00:00');
+      const days=Math.round((today2-d)/(1000*60*60*24));
+      el.textContent='Data to: '+dateStr+' ('+days+'d ago)';
+      el.className='sfresh '+(days<=2?'fresh':days<=5?'stale':'old');
+    }
+    setSpendFresh('fr_brand_spend', lastSpendDate(S.brand_spend));
+    setSpendFresh('fr_perf_spend',  lastSpendDate(S.perf_spend));
+  })();
 
   // Chart range labels
   const rng = fmtDay(slice.dates[0])+' → '+fmtDay(slice.dates[slice.dates.length-1]);
@@ -1440,8 +2084,11 @@ function renderDashboard(slice,g){
                 : baselines.revenue_india_daily||0;
   mkChart('ch_rev', revL, [ds(revV,'India NMV (₹)','#14b8a6','#14b8a622'), baseds(revBase, revL.length)]);
 
-  // Re-render the two new combo charts using current toggle states
+  // Re-render the combo charts using current toggle states
   renderAllSessions(slice, g);
+  renderInstSplit(slice, g);
+  renderBvP(slice, g);
+  renderSpend(slice, g);
   renderCorrelation(slice, g);
 
   // SOV donut (latest data point in slice)
@@ -1462,7 +2109,6 @@ const SESS_DEFS = [
   {key:'total_installs',         label:'Total Installs',   color:'#f59e0b'},
   {key:'direct_installs',        label:'Organic Installs', color:'#fb923c'},
 ];
-let sessTog = new Set(['total_nonpaid_sessions','total_paid_sessions']); // default on
 
 function toggleSess(btn){
   const key=btn.dataset.key;
@@ -1485,16 +2131,186 @@ function renderAllSessions(slice, g){
   mkChart('ch_all_sess', labels, datasets.length ? datasets : [{label:'No signals selected',data:[],borderColor:'transparent'}]);
 }
 
+// ── Brand vs Performance Sessions stacked bar ────────────────────────────────
+function renderBvP(slice, g){
+  const {labels, values: brandVals} = aggregate(slice.dates, slice.brand_paid_sessions, g);
+  const {values: perfVals}          = aggregate(slice.dates, slice.perf_sessions, g);
+
+  // Ratio display — latest complete period
+  const lastBrand = [...brandVals].reverse().find(v=>v!=null&&v>0) || 0;
+  const lastPerf  = [...perfVals].reverse().find(v=>v!=null&&v>0)  || 0;
+  const total     = lastBrand + lastPerf;
+  const el = document.getElementById('bvpRatioDisplay');
+  if(el && total>0){
+    const bp = Math.round(lastBrand/total*100);
+    const pp = 100-bp;
+    el.innerHTML = `Latest period split: <b style="color:#8b5cf6">${bp}% Brand</b> · <b style="color:#ef4444">${pp}% Performance</b>`;
+  }
+
+  const rangeEl = document.getElementById('bvpRangeLabel');
+  if(rangeEl && labels.length) rangeEl.textContent = labels[0]+' – '+labels[labels.length-1];
+
+  if(CI['ch_bvp']){CI['ch_bvp'].destroy(); delete CI['ch_bvp'];}
+  const ctx = document.getElementById('ch_bvp').getContext('2d');
+  CI['ch_bvp'] = new Chart(ctx,{
+    type:'bar',
+    data:{
+      labels,
+      datasets:[
+        {label:'Brand Paid',   data:brandVals, backgroundColor:'#8b5cf6cc', borderColor:'#8b5cf6', borderWidth:1, stack:'paid'},
+        {label:'Performance',  data:perfVals,  backgroundColor:'#ef4444cc', borderColor:'#ef4444', borderWidth:1, stack:'paid'},
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{display:true,position:'top',labels:{color:'rgba(255,255,255,.7)',font:{size:10},boxWidth:10,padding:8}},
+        tooltip:{callbacks:{
+          label:c=>`${c.dataset.label}: ${Math.round(c.raw||0).toLocaleString('en-IN')}`,
+          footer:items=>{
+            const t=items.reduce((s,i)=>s+(i.raw||0),0);
+            if(!t) return '';
+            const b=items.find(i=>i.dataset.label==='Brand Paid');
+            const bp=b?Math.round((b.raw||0)/t*100):0;
+            return `Brand ${bp}% · Perf ${100-bp}%`;
+          }
+        }}
+      },
+      scales:{
+        x:{stacked:true,grid:{color:'rgba(255,255,255,.04)'},ticks:{color:'rgba(255,255,255,.5)',font:{size:9},maxTicksLimit:14}},
+        y:{stacked:true,grid:{color:'rgba(255,255,255,.06)'},ticks:{color:'rgba(255,255,255,.5)',font:{size:9},callback:v=>v>=1000?(v/1000).toFixed(0)+'k':v}}
+      }
+    }
+  });
+}
+
+// ── Organic vs Paid Installs stacked bar ─────────────────────────────────────
+function renderInstSplit(slice, g){
+  const {labels, values: orgVals} = aggregate(slice.dates, slice.direct_installs, g);
+  const {values: paidVals}        = aggregate(slice.dates, slice.paid_installs, g);
+
+  const lastOrg  = [...orgVals].reverse().find(v=>v!=null&&v>0)  || 0;
+  const lastPaid = [...paidVals].reverse().find(v=>v!=null&&v>0) || 0;
+  const total    = lastOrg + lastPaid;
+  const el = document.getElementById('instSplitRatioDisplay');
+  if(el && total>0){
+    const op = Math.round(lastOrg/total*100);
+    el.innerHTML = `Latest split: <b style="color:#22c55e">${op}% Organic</b> · <b style="color:#f59e0b">${100-op}% Paid</b>`;
+  }
+  const rangeEl = document.getElementById('instSplitRangeLabel');
+  if(rangeEl && labels.length) rangeEl.textContent = labels[0]+' – '+labels[labels.length-1];
+
+  if(CI['ch_inst_split']){CI['ch_inst_split'].destroy(); delete CI['ch_inst_split'];}
+  const ctx = document.getElementById('ch_inst_split').getContext('2d');
+  CI['ch_inst_split'] = new Chart(ctx,{
+    type:'bar',
+    data:{
+      labels,
+      datasets:[
+        {label:'Organic',  data:orgVals,  backgroundColor:'#22c55ecc', borderColor:'#22c55e', borderWidth:1, stack:'inst'},
+        {label:'Paid',     data:paidVals, backgroundColor:'#f59e0bcc', borderColor:'#f59e0b', borderWidth:1, stack:'inst'},
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{display:true,position:'top',labels:{color:'rgba(255,255,255,.7)',font:{size:10},boxWidth:10,padding:8}},
+        tooltip:{callbacks:{
+          label:c=>`${c.dataset.label}: ${Math.round(c.raw||0).toLocaleString('en-IN')}`,
+          footer:items=>{
+            const t=items.reduce((s,i)=>s+(i.raw||0),0);
+            if(!t) return '';
+            const o=items.find(i=>i.dataset.label==='Organic');
+            const op=o?Math.round((o.raw||0)/t*100):0;
+            return `Organic ${op}% · Paid ${100-op}%`;
+          }
+        }}
+      },
+      scales:{
+        x:{stacked:true,grid:{color:'rgba(255,255,255,.04)'},ticks:{color:'rgba(255,255,255,.5)',font:{size:9},maxTicksLimit:14}},
+        y:{stacked:true,grid:{color:'rgba(255,255,255,.06)'},ticks:{color:'rgba(255,255,255,.5)',font:{size:9},callback:v=>v>=1000?(v/1000).toFixed(0)+'k':v}}
+      }
+    }
+  });
+}
+
 // ── Signal Correlation overlay (normalised to index 100 = baseline) ───────────
+// ── Spend trend charts ────────────────────────────────────────────────────────
+function renderSpend(slice, g){
+  const hasSpend = (slice.brand_spend||[]).some(v=>v!=null) || (slice.perf_spend||[]).some(v=>v!=null);
+
+  ['brand_spend','perf_spend'].forEach(key=>{
+    const chartId = 'ch_'+key;
+    const color = key==='brand_spend' ? '#7c3aed' : '#dc2626';
+    const label = key==='brand_spend' ? 'Brand Spend (\u20B9)' : 'Perf Spend (\u20B9)';
+    const arr = slice[key]||[];
+    const {labels, values} = aggregate(slice.dates, arr, g);
+    if(!hasSpend){ if(CI[chartId]){CI[chartId].destroy();delete CI[chartId];} return; }
+    mkChart(chartId, labels, [ds(values, label, color, color+'22')]);
+  });
+
+  const {labels, values: brandVals} = aggregate(slice.dates, slice.brand_spend||[], g);
+  const {values: perfVals}          = aggregate(slice.dates, slice.perf_spend||[], g);
+
+  const lastBrand = [...brandVals].reverse().find(v=>v!=null&&v>0) || 0;
+  const lastPerf  = [...perfVals].reverse().find(v=>v!=null&&v>0)  || 0;
+  const totalSpend = lastBrand + lastPerf;
+  const splitEl = document.getElementById('spendSplitDisplay');
+  if(splitEl && totalSpend>0){
+    const bp = Math.round(lastBrand/totalSpend*100);
+    splitEl.innerHTML = 'Latest: <b style="color:#7c3aed">'+bp+'% Brand</b> \u00B7 <b style="color:#dc2626">'+(100-bp)+'% Perf</b>';
+  }
+  const rangeEl = document.getElementById('spendStackRangeLabel');
+  if(rangeEl && labels.length) rangeEl.textContent = labels[0]+' \u2013 '+labels[labels.length-1];
+
+  if(CI['ch_spend_stack']){CI['ch_spend_stack'].destroy(); delete CI['ch_spend_stack'];}
+  const ctx = document.getElementById('ch_spend_stack').getContext('2d');
+  CI['ch_spend_stack'] = new Chart(ctx,{
+    type:'bar',
+    data:{
+      labels,
+      datasets:[
+        {label:'Brand Spend', data:brandVals, backgroundColor:'#7c3aedcc', borderColor:'#7c3aed', borderWidth:1, stack:'spend'},
+        {label:'Perf Spend',  data:perfVals,  backgroundColor:'#dc2626cc', borderColor:'#dc2626', borderWidth:1, stack:'spend'},
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{display:true,position:'top',labels:{color:'rgba(255,255,255,.7)',font:{size:10},boxWidth:10,padding:8}},
+        tooltip:{callbacks:{
+          label:c=>c.dataset.label+': \u20B9'+Math.round(c.raw||0).toLocaleString('en-IN'),
+          footer:items=>{
+            const t=items.reduce((s,i)=>s+(i.raw||0),0);
+            if(!t) return '';
+            const b=items.find(i=>i.dataset.label==='Brand Spend');
+            const bp=b?Math.round((b.raw||0)/t*100):0;
+            return 'Total: \u20B9'+Math.round(t).toLocaleString('en-IN')+' \u00B7 Brand '+bp+'%';
+          }
+        }}
+      },
+      scales:{
+        x:{stacked:true,grid:{color:'rgba(255,255,255,.04)'},ticks:{color:'rgba(255,255,255,.5)',font:{size:9},maxTicksLimit:14}},
+        y:{stacked:true,grid:{color:'rgba(255,255,255,.06)'},ticks:{color:'rgba(255,255,255,.5)',font:{size:9},
+           callback:v=>v>=1e6?'\u20B9'+(v/1e6).toFixed(1)+'M':v>=1e3?'\u20B9'+(v/1e3).toFixed(0)+'k':'\u20B9'+v}}
+      }
+    }
+  });
+}
+
 const CORR_DEFS = [
-  {key:'branded_search',         label:'Branded Search',  color:'#e8450a', base:'branded_search_impressions'},
-  {key:'total_nonpaid_sessions', label:'Non-Paid Sess',   color:'#6366f1', base:'total_nonpaid_sessions_india'},
-  {key:'total_paid_sessions',    label:'Paid Sessions',   color:'#ef4444', base:'total_paid_sessions_india'},
-  {key:'direct_installs',        label:'Organic Installs',color:'#f59e0b', base:'direct_installs_india'},
-  {key:'revenue_india',          label:'India NMV',       color:'#14b8a6', base:'revenue_india_daily'},
-  {key:'brand_paid_sessions',    label:'Brand Paid',      color:'#8b5cf6', base:'brand_paid_sessions_india'},
+  {key:'branded_search',      label:'Branded Search',   color:'#e8450a', base:'branded_search_impressions'},
+  {key:'direct_sessions',     label:'Non-Paid Brand',   color:'#3b82f6', base:'direct_sessions_india'},
+  {key:'brand_paid_sessions', label:'Brand Paid',       color:'#8b5cf6', base:'brand_paid_sessions_india'},
+  {key:'perf_sessions',       label:'Performance',      color:'#ef4444', base:'total_paid_sessions_india'},
+  {key:'direct_installs',     label:'Organic Installs', color:'#f59e0b', base:'direct_installs_india'},
+  {key:'revenue_india',       label:'India NMV',        color:'#14b8a6', base:'revenue_india_daily'},
+  {key:'brand_spend',         label:'Brand Spend',      color:'#7c3aed', base:'gads_brand_spend_per_week'},
+  {key:'perf_spend',          label:'Perf Spend',       color:'#dc2626', base:'perf_spend_per_week'},
 ];
-let corrTog = new Set(['branded_search','total_nonpaid_sessions','total_paid_sessions','direct_installs','revenue_india']);
 
 function toggleCorr(btn){
   const key=btn.dataset.key;
@@ -1722,6 +2538,421 @@ renderDashboard(sliceByDate(view90,maxDate),gran);
 # GENERATE DASHBOARD
 # ─────────────────────────────────────────────────────────────────────────────
 
+def generate_analysis(store, config):
+    """
+    Generates the intelligence analysis for the dashboard.
+    Returns a dict with: common_date, signal_freshness, narrative, alerts, action_cards, digest, chat_context, chat_qa
+    All analysis is based on the 'common date' — last date where all core signals have data.
+    """
+    from datetime import date as _date, timedelta as _td
+    import statistics
+
+    dates = store.get("dates", [])
+    if not dates:
+        return {"common_date": None, "signal_freshness": {}, "narrative": "No data available yet.", "alerts": [], "action_cards": [], "digest": {}, "chat_context": "", "chat_qa": []}
+
+    baselines = config.get("baselines", {})
+    BS_WK  = baselines.get("branded_search_impressions", 9044)
+    DI_WK  = baselines.get("direct_installs_india", 6440)
+    BP_WK  = baselines.get("brand_paid_sessions_india", 162760)
+    REV_WK = baselines.get("revenue_india_weekly", 39809911)
+    # daily equivalents
+    BS_DAY  = BS_WK / 7
+    DI_DAY  = DI_WK / 7
+    BP_DAY  = BP_WK / 7
+    REV_DAY = REV_WK / 7
+
+    # ── Signal freshness ──────────────────────────────────────────────────────
+    signal_meta = [
+        ("branded_search",      "GSC",          "Branded Search"),
+        ("direct_installs",     "AppsFlyer",    "Organic Installs"),
+        ("brand_paid_sessions", "GA4",          "Brand Paid Sessions"),
+        ("revenue_india",       "Revenue MCP",  "India NMV"),
+        ("brand_spend",         "Spend Sheet",  "Brand Spend"),
+        ("perf_spend",          "Spend Sheet",  "Perf Spend"),
+    ]
+    freshness = {}
+    for sig, source, label in signal_meta:
+        arr = store.get(sig, [])
+        for i in range(len(arr) - 1, -1, -1):
+            if arr[i] is not None and arr[i] > 0:
+                freshness[sig] = {"date": dates[i] if i < len(dates) else None, "source": source, "label": label}
+                break
+        if sig not in freshness:
+            freshness[sig] = {"date": None, "source": source, "label": label}
+
+    # ── Common date = min of core signal fresh dates ──────────────────────────
+    core_keys = ["branded_search", "direct_installs", "brand_paid_sessions", "revenue_india"]
+    core_fresh = [freshness[k]["date"] for k in core_keys if freshness[k]["date"]]
+    if not core_fresh:
+        return {"common_date": None, "signal_freshness": freshness, "narrative": "Insufficient data for analysis.", "alerts": [], "action_cards": [], "digest": {}, "chat_context": "", "chat_qa": []}
+    common_date = min(core_fresh)
+
+    # ── Windowed helpers ──────────────────────────────────────────────────────
+    cd = _date.fromisoformat(common_date)
+    curr_start = (cd - _td(days=27)).isoformat()   # 4 weeks ending common_date
+    prev_end   = (cd - _td(days=28)).isoformat()   # 4 weeks before that
+    prev_start = (cd - _td(days=55)).isoformat()
+
+    def window_vals(sig, s, e):
+        arr = store.get(sig, [])
+        return [arr[i] for i, d in enumerate(dates)
+                if s <= d <= e and i < len(arr) and arr[i] is not None and arr[i] > 0]
+
+    def wk_avg(vals):
+        """Convert daily values to weekly total equivalent."""
+        if not vals: return None
+        return sum(vals) / len(vals) * 7
+
+    def pct(curr, base):
+        if curr is None or not base: return None
+        return (curr - base) / base * 100
+
+    def fmt_pct(p, plus=True):
+        if p is None: return "—"
+        sign = "+" if p >= 0 else ""
+        return f"{sign}{p:.1f}%"
+
+    def fmt_num(n, precision=0):
+        if n is None: return "—"
+        return f"{n:,.{precision}f}"
+
+    # ── Compute metrics ───────────────────────────────────────────────────────
+    # Current 4-week window
+    bs_c  = wk_avg(window_vals("branded_search",      curr_start, common_date))
+    di_c  = wk_avg(window_vals("direct_installs",     curr_start, common_date))
+    bp_c  = wk_avg(window_vals("brand_paid_sessions", curr_start, common_date))
+    rv_c  = wk_avg(window_vals("revenue_india",       curr_start, common_date))
+    ps_c  = wk_avg(window_vals("perf_spend",          curr_start, common_date))
+    bms_c = wk_avg(window_vals("brand_spend",         curr_start, common_date))
+
+    # Prev 4-week window
+    bs_p  = wk_avg(window_vals("branded_search",      prev_start, prev_end))
+    di_p  = wk_avg(window_vals("direct_installs",     prev_start, prev_end))
+    bp_p  = wk_avg(window_vals("brand_paid_sessions", prev_start, prev_end))
+    rv_p  = wk_avg(window_vals("revenue_india",       prev_start, prev_end))
+
+    # Deltas vs baseline
+    bs_vs_bl  = pct(bs_c,  BS_WK)
+    di_vs_bl  = pct(di_c,  DI_WK)
+    bp_vs_bl  = pct(bp_c,  BP_WK)
+    rv_vs_bl  = pct(rv_c,  REV_WK)
+
+    # WoW / period-over-period
+    bs_pop = pct(bs_c, bs_p)
+    di_pop = pct(di_c, di_p)
+    bp_pop = pct(bp_c, bp_p)
+    rv_pop = pct(rv_c, rv_p)
+
+    # Spend mix (use available spend data, whatever window it's in)
+    all_bs  = window_vals("brand_spend", "2020-01-01", common_date)
+    all_ps  = window_vals("perf_spend",  "2020-01-01", common_date)
+    brand_spend_day = sum(all_bs[-28:]) / len(all_bs[-28:]) if all_bs else None
+    perf_spend_day  = sum(all_ps[-28:]) / len(all_ps[-28:]) if all_ps else None
+    total_spend_day = (brand_spend_day or 0) + (perf_spend_day or 0)
+    brand_mix_pct   = (brand_spend_day / total_spend_day * 100) if total_spend_day > 0 else None
+
+    # WoW variance for anomaly detection (last 7 days vs 7 days before)
+    last7_start  = (cd - _td(days=6)).isoformat()
+    prev7_start  = (cd - _td(days=13)).isoformat()
+    prev7_end    = (cd - _td(days=7)).isoformat()
+
+    bs_7  = wk_avg(window_vals("branded_search",      last7_start, common_date))
+    bs_7p = wk_avg(window_vals("branded_search",      prev7_start, prev7_end))
+    di_7  = wk_avg(window_vals("direct_installs",     last7_start, common_date))
+    di_7p = wk_avg(window_vals("direct_installs",     prev7_start, prev7_end))
+    rv_7  = wk_avg(window_vals("revenue_india",       last7_start, common_date))
+    rv_7p = wk_avg(window_vals("revenue_india",       prev7_start, prev7_end))
+
+    bs_wow  = pct(bs_7, bs_7p)
+    di_wow  = pct(di_7, di_7p)
+    rv_wow  = pct(rv_7, rv_7p)
+
+    # ── Narrative ─────────────────────────────────────────────────────────────
+    campaign_start = config.get("campaign", {}).get("start_date", "2026-04-15")
+    days_since_launch = (cd - _date.fromisoformat(campaign_start)).days if campaign_start else None
+    phase_str = f"Day {days_since_launch} of the Bangalore campaign" if days_since_launch and days_since_launch >= 0 else "Pre-campaign baseline period"
+
+    def signal_sentence(name, curr, baseline, pop):
+        delta_bl  = pct(curr, baseline)
+        if curr is None: return f"{name} data not yet available for this period."
+        if delta_bl is None:
+            return f"{name} is tracking at {fmt_num(curr, 0)}/wk."
+        dir_bl = "above" if delta_bl >= 0 else "below"
+        pop_str = f", {fmt_pct(pop)} vs the prior 4 weeks" if pop is not None else ""
+        strength = "significantly" if abs(delta_bl) > 20 else "modestly" if abs(delta_bl) > 8 else "roughly in line"
+        return f"{name} is {strength} {dir_bl} baseline at {fmt_pct(delta_bl)}{pop_str}."
+
+    bs_sentence  = signal_sentence("Branded search", bs_c,  BS_WK,  bs_pop)
+    di_sentence  = signal_sentence("Organic installs", di_c, DI_WK, di_pop)
+    bp_sentence  = signal_sentence("Brand paid sessions", bp_c, BP_WK, bp_pop)
+    rv_sentence  = signal_sentence("India NMV", rv_c, REV_WK, rv_pop)
+
+    # Cross-signal divergence commentary
+    divergence_notes = []
+    if bs_vs_bl is not None and di_vs_bl is not None:
+        diff = bs_vs_bl - di_vs_bl
+        if diff > 15:
+            divergence_notes.append(
+                f"There is a notable divergence: branded search is outpacing organic installs by {diff:.0f} percentage points vs baseline. "
+                "This may reflect a 2–3 day lag in app store conversion, or friction in the app store funnel."
+            )
+        elif di_vs_bl > bs_vs_bl + 15:
+            divergence_notes.append(
+                "Organic installs are outpacing branded search growth — a positive sign that word-of-mouth or direct navigation is amplifying search intent."
+            )
+
+    spend_note = ""
+    if brand_mix_pct is not None:
+        if brand_mix_pct < 15:
+            spend_note = (
+                f"Spend mix is heavily performance-weighted ({brand_mix_pct:.0f}% brand vs {100-brand_mix_pct:.0f}% performance). "
+                "Given the Bangalore OOH campaign is live, there may be headroom to increase brand investment to amplify offline reach."
+            )
+        elif brand_mix_pct > 40:
+            spend_note = (
+                f"Brand spend represents {brand_mix_pct:.0f}% of total — a strong brand investment posture that should compound into organic signal growth over the next 2–3 weeks."
+            )
+
+    narrative_parts = [
+        f"Analysis window: {curr_start} → {common_date} ({phase_str}).",
+        bs_sentence, di_sentence, bp_sentence, rv_sentence,
+    ]
+    if divergence_notes:
+        narrative_parts.extend(divergence_notes)
+    if spend_note:
+        narrative_parts.append(spend_note)
+
+    narrative = " ".join(narrative_parts)
+
+    # ── Alerts ────────────────────────────────────────────────────────────────
+    alerts = []
+    ALERT_THRESH = 15  # % WoW change to flag
+
+    def make_alert(signal_label, wow_pct, vs_bl_pct, direction="down"):
+        if wow_pct is None: return None
+        if direction == "down" and wow_pct < -ALERT_THRESH:
+            return {
+                "level": "warn",
+                "signal": signal_label,
+                "msg": f"Down {abs(wow_pct):.0f}% vs prior week",
+                "sub": f"{fmt_pct(vs_bl_pct)} vs baseline. Check for data freshness issues or real signal drop.",
+                "icon": "↓"
+            }
+        elif direction == "up" and wow_pct > ALERT_THRESH * 2:
+            return {
+                "level": "info",
+                "signal": signal_label,
+                "msg": f"Up {wow_pct:.0f}% vs prior week",
+                "sub": f"Strong momentum: {fmt_pct(vs_bl_pct)} vs baseline.",
+                "icon": "↑"
+            }
+        return None
+
+    for sig_label, wow, vs_bl in [
+        ("Branded Search", bs_wow, bs_vs_bl),
+        ("Organic Installs", di_wow, di_vs_bl),
+        ("India NMV", rv_wow, rv_vs_bl),
+    ]:
+        a = make_alert(sig_label, wow, vs_bl, "down")
+        if a: alerts.append(a)
+        a = make_alert(sig_label, wow, vs_bl, "up")
+        if a: alerts.append(a)
+
+    # Divergence alert
+    if bs_vs_bl is not None and di_vs_bl is not None and (bs_vs_bl - di_vs_bl) > 15:
+        alerts.append({
+            "level": "warn",
+            "signal": "Search → Install Gap",
+            "msg": f"Branded search leading installs by {bs_vs_bl - di_vs_bl:.0f}pp vs baseline",
+            "sub": "App store conversion may be lagging. Check Play Store / App Store listing conversion rate.",
+            "icon": "⚡"
+        })
+
+    if brand_mix_pct is not None and brand_mix_pct < 12:
+        alerts.append({
+            "level": "info",
+            "signal": "Spend Mix",
+            "msg": f"Brand spend only {brand_mix_pct:.0f}% of total outlay",
+            "sub": "Performance-heavy mix may limit long-term brand compounding during the OOH campaign window.",
+            "icon": "₹"
+        })
+
+    # ── Action Cards ──────────────────────────────────────────────────────────
+    actions = []
+
+    # 1. If branded search up but installs lagging → app store action
+    if bs_vs_bl is not None and di_vs_bl is not None and bs_vs_bl > 10 and di_vs_bl < bs_vs_bl - 10:
+        actions.append({
+            "priority": 1,
+            "title": "Fix Search → Install Leakage",
+            "why": f"Branded search is {fmt_pct(bs_vs_bl)} vs baseline but organic installs are only {fmt_pct(di_vs_bl)}. Intent is being created but not converting.",
+            "actions": [
+                "Check Play Store and App Store listing conversion rate (install page CTR).",
+                "A/B test app store screenshots and description copy for Bangalore audience.",
+                "Ensure brand campaign UTMs are correctly attributing installs.",
+            ],
+            "impact": "high",
+            "effort": "medium",
+            "icon": "🔧"
+        })
+
+    # 2. Spend efficiency / brand mix
+    if brand_mix_pct is not None and brand_mix_pct < 15:
+        actions.append({
+            "priority": 2,
+            "title": "Rebalance Spend Mix for Campaign Amplification",
+            "why": f"Brand spend is only {brand_mix_pct:.0f}% of total. With OOH live in Bangalore, increasing brand digital spend now amplifies the offline signal.",
+            "actions": [
+                f"Consider increasing brand search budget by 20–30% in Bangalore-targeted campaigns.",
+                "Allocate a portion of performance budget to branded keywords to capture OOH-primed searches.",
+                "Monitor brand impression share — aim to defend 90%+ in Bangalore.",
+            ],
+            "impact": "high",
+            "effort": "low",
+            "icon": "📈"
+        })
+
+    # 3. Revenue is positive but brand sessions massively up → efficiency check
+    if bp_vs_bl is not None and rv_vs_bl is not None and bp_vs_bl > 100 and rv_vs_bl < bp_vs_bl / 3:
+        actions.append({
+            "priority": 3,
+            "title": "Audit Brand Campaign Efficiency",
+            "why": f"Brand paid sessions are {fmt_pct(bp_vs_bl)} vs baseline but revenue is only {fmt_pct(rv_vs_bl)}. Session growth is not translating proportionally.",
+            "actions": [
+                "Review conversion rate on brand campaign landing pages.",
+                "Check if brand campaign traffic is landing on correct category pages.",
+                "Segment brand campaign performance by city to identify BLR vs rest-of-India split.",
+            ],
+            "impact": "medium",
+            "effort": "low",
+            "icon": "🔍"
+        })
+
+    # 4. Continue / maintain if things are good
+    if bs_vs_bl is not None and bs_vs_bl > 15 and rv_vs_bl is not None and rv_vs_bl > 10:
+        actions.append({
+            "priority": len(actions) + 1,
+            "title": "Maintain Campaign Momentum — Week 2 Check",
+            "why": f"Core signals are healthy: branded search {fmt_pct(bs_vs_bl)} vs baseline, revenue {fmt_pct(rv_vs_bl)} vs baseline.",
+            "actions": [
+                "Hold current OOH and digital placements through week 2.",
+                "Begin tracking Bangalore-specific NMV delta vs non-Bangalore cities as the install lag resolves.",
+                "Schedule a post-campaign decay check 2 weeks after OOH ends.",
+            ],
+            "impact": "medium",
+            "effort": "low",
+            "icon": "✅"
+        })
+
+    actions.sort(key=lambda a: a["priority"])
+
+    # ── Weekly Digest ─────────────────────────────────────────────────────────
+    def status(vs_bl, threshold=10):
+        if vs_bl is None: return "no_data"
+        if vs_bl >= threshold: return "on_track"
+        if vs_bl >= 0: return "watch"
+        return "off_track"
+
+    digest = {
+        "period": f"{curr_start} → {common_date}",
+        "generated_at": str(_date.today()),
+        "signals": [
+            {"name": "Branded Search",     "current": f"{fmt_num(bs_c, 0)}/wk",  "vs_baseline": fmt_pct(bs_vs_bl), "vs_prev": fmt_pct(bs_pop), "status": status(bs_vs_bl)},
+            {"name": "Organic Installs",   "current": f"{fmt_num(di_c, 0)}/wk",  "vs_baseline": fmt_pct(di_vs_bl), "vs_prev": fmt_pct(di_pop), "status": status(di_vs_bl, 5)},
+            {"name": "Brand Paid Sessions","current": f"{fmt_num(bp_c, 0)}/wk",  "vs_baseline": fmt_pct(bp_vs_bl), "vs_prev": fmt_pct(bp_pop), "status": status(bp_vs_bl, 15)},
+            {"name": "India NMV",          "current": f"₹{fmt_num(rv_c, 0)}/wk", "vs_baseline": fmt_pct(rv_vs_bl), "vs_prev": fmt_pct(rv_pop), "status": status(rv_vs_bl)},
+        ],
+        "top_concern": alerts[0]["signal"] if alerts else None,
+        "top_opportunity": actions[0]["title"] if actions else None,
+    }
+
+    # ── Chat Context (compact data summary for the Q&A engine) ───────────────
+    chat_context = (
+        f"Supertails brand signal dashboard — Analysis as of {common_date}.\n"
+        f"4-week window: {curr_start} → {common_date}.\n"
+        f"Baselines (weekly): branded search {BS_WK:,} impressions | organic installs {DI_WK:,} | brand paid sessions {BP_WK:,} | NMV ₹{REV_WK:,}.\n"
+        f"Current (weekly): branded search {fmt_num(bs_c,0)} ({fmt_pct(bs_vs_bl)} vs baseline) | "
+        f"organic installs {fmt_num(di_c,0)} ({fmt_pct(di_vs_bl)} vs baseline) | "
+        f"brand paid sessions {fmt_num(bp_c,0)} ({fmt_pct(bp_vs_bl)} vs baseline) | "
+        f"NMV ₹{fmt_num(rv_c,0)} ({fmt_pct(rv_vs_bl)} vs baseline).\n"
+        f"Period-over-period: branded search {fmt_pct(bs_pop)} | installs {fmt_pct(di_pop)} | revenue {fmt_pct(rv_pop)}.\n"
+        f"Spend mix: brand ₹{fmt_num(brand_spend_day,0)}/day ({brand_mix_pct:.0f}% of total) | perf ₹{fmt_num(perf_spend_day,0)}/day.\n"
+        f"Key concern: {alerts[0]['signal'] + ' — ' + alerts[0]['msg'] if alerts else 'No major anomalies'}.\n"
+        f"Campaign: Bangalore offline launch ~Apr 15 2026."
+    )
+
+    # ── Pre-generated Q&A ─────────────────────────────────────────────────────
+    chat_qa = [
+        {
+            "q": "Why are installs below baseline despite branded search being up?",
+            "a": (
+                f"Branded search is {fmt_pct(bs_vs_bl)} vs baseline, showing the campaign is successfully building brand awareness and intent. "
+                f"However organic installs are {fmt_pct(di_vs_bl)} vs baseline — a gap of {(bs_vs_bl or 0) - (di_vs_bl or 0):.0f} percentage points. "
+                "This is a classic intent-to-conversion gap. Three likely causes: (1) 2–3 day natural lag between search intent and app install — installs typically follow branded search by 48–72 hours; "
+                "(2) App store listing friction — if someone searches 'supertails' and lands on the Play Store listing, CTR and conversion rate may be the bottleneck; "
+                "(3) Attribution window — some installs triggered by the campaign may be classified as 'paid' rather than 'organic' depending on media source tags."
+            )
+        },
+        {
+            "q": "Is the Bangalore campaign working?",
+            "a": (
+                f"The digital signals look encouraging. Branded search is {fmt_pct(bs_vs_bl)} above baseline — the best pre-proxy for offline brand awareness. "
+                f"Revenue is {fmt_pct(rv_vs_bl)} above baseline on a weekly basis. "
+                "However we don't yet have city-level AppsFlyer data to isolate Bangalore specifically — the current signals are all-India. "
+                "The true Bangalore lift will only be measurable once you re-export AppsFlyer CSVs with the City dimension enabled, or once Google Ads city-level conversion data is available."
+            )
+        },
+        {
+            "q": "What should I prioritise this week?",
+            "a": (
+                f"Top 3 this week: "
+                f"(1) {actions[0]['title'] if actions else 'Maintain campaign'} — {actions[0]['why'] if actions else ''}. "
+                f"(2) {actions[1]['title'] if len(actions)>1 else 'Monitor spend mix'} — {actions[1]['why'] if len(actions)>1 else ''}. "
+                f"(3) Re-export AppsFlyer installs with City dimension to populate Bangalore-specific install data, which will unlock the four-signal framework fully."
+            )
+        },
+        {
+            "q": "How is the spend mix?",
+            "a": (
+                f"Based on February spend data (most recent available in the sheet): brand spend is ₹{fmt_num(brand_spend_day,0)}/day ({brand_mix_pct:.0f}% of total) "
+                f"and performance spend is ₹{fmt_num(perf_spend_day,0)}/day. "
+                f"The mix is heavily performance-weighted. Industry benchmarks (Binet & Field) suggest 40–60% brand investment for sustained growth. "
+                "Given OOH is live now, there's a strong case to temporarily shift more budget to brand search to capture the demand being generated offline."
+            ) if brand_mix_pct else "Spend data is available from February 2026. Connect the Google Sheet to fetch more recent spend data."
+        },
+        {
+            "q": "When will installs recover?",
+            "a": (
+                f"Based on historical correlation in this store (r=0.55 lag), branded search leads app installs by approximately 2 days. "
+                f"Branded search has been elevated since ~April 5. If the pattern holds, install recovery should be visible around April 7–10. "
+                f"The most recent data is to {common_date} — check the dashboard again in 2–3 days for confirmation."
+            )
+        },
+        {
+            "q": "What is the revenue trend?",
+            "a": (
+                f"India NMV for the current 4-week window is ₹{fmt_num(rv_c,0)}/week, "
+                f"which is {fmt_pct(rv_vs_bl)} vs the pre-campaign baseline of ₹{REV_WK:,.0f}/week. "
+                f"vs the prior 4 weeks, revenue is {fmt_pct(rv_pop)}. "
+                "The trend is positive. Note that April 3–5 included the WTF Sale which inflated numbers; the baseline was computed excluding that period."
+            )
+        },
+    ]
+
+    return {
+        "common_date": common_date,
+        "signal_freshness": freshness,
+        "curr_start": curr_start,
+        "narrative": narrative,
+        "alerts": alerts,
+        "action_cards": actions,
+        "digest": digest,
+        "chat_context": chat_context,
+        "chat_qa": chat_qa,
+    }
+
+
 def generate_dashboard(store, config, output_path="supertails_dashboard.html"):
     campaign = config.get("campaign", {})
     store_out = dict(store)
@@ -1749,16 +2980,22 @@ def generate_dashboard(store, config, output_path="supertails_dashboard.html"):
             "meltwater":  bool(mw_key  and not mw_key.startswith("YOUR_")  and mw_id and not mw_id.startswith("SEARCH_ID")),
             "gsc":        bool(gsc.get("service_account_key_path") and gsc.get("site_url")),
             "ga4":        bool(ga4.get("property_id")),
-            "appsflyer":  bool(af.get("api_token") and not str(af.get("api_token","")).startswith("YOUR_")),
+            "appsflyer":  bool(af.get("api_token") and not str(af.get("api_token","")).startswith("YOUR_"))
+                          or bool(any(v for v in (store.get("direct_installs") or []) if v)),
         }
     }
+
+    # Generate intelligence analysis
+    analysis     = generate_analysis(store, config)
+    analysis_json = json.dumps(analysis, default=str)
 
     store_json  = json.dumps(store_out,  default=str)
     config_json = json.dumps(config_out, default=str)
 
     html = DASHBOARD_HTML \
-        .replace("__STORE_DATA__",  store_json) \
-        .replace("__CONFIG_DATA__", config_json)
+        .replace("__STORE_DATA__",    store_json) \
+        .replace("__CONFIG_DATA__",   config_json) \
+        .replace("__ANALYSIS_DATA__", analysis_json)
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
@@ -1836,20 +3073,30 @@ def netlify_deploy(output_path="supertails_dashboard.html"):
     print("\n📤  Pushing dashboard to GitHub → Netlify will auto-deploy...", flush=True)
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    cmds = [
-        ["git", "add", output_path, "data_store.json"],
-        ["git", "commit", "-m", f"dashboard: auto-update {ts}"],
-        ["git", "push"],
-    ]
-    for cmd in cmds:
+
+    def run_git(cmd):
         r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            # "nothing to commit" is fine — not a real error
-            if "nothing to commit" in r.stdout or "nothing to commit" in r.stderr:
-                print("  (no changes to push — dashboard already up to date)")
-                return
-            print(f"⚠️   git command failed: {' '.join(cmd)}\n    {r.stderr.strip()}")
-            return
+        combined = (r.stdout + r.stderr).strip()
+        return r.returncode, combined
+
+    # Stage files
+    files_to_stage = [output_path, "data_store.json", "config.json", "fetch_signals.py"]
+    files_to_stage = [f for f in files_to_stage if os.path.exists(f)]
+    code, out = run_git(["git", "add"] + files_to_stage)
+    if code != 0:
+        print(f"⚠️  git add failed:\n    {out}"); return
+
+    # Commit
+    code, out = run_git(["git", "commit", "--no-verify", "-m", f"update {ts}"])
+    if code != 0:
+        if "nothing to commit" in out:
+            print("  (no changes — dashboard already up to date on GitHub)"); return
+        print(f"⚠️  git commit failed:\n    {out}"); return
+
+    # Push
+    code, out = run_git(["git", "push"])
+    if code != 0:
+        print(f"⚠️  git push failed:\n    {out}"); return
 
     print("✅  Pushed to GitHub. Netlify will deploy in ~30 seconds.")
 

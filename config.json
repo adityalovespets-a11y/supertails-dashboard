@@ -222,6 +222,19 @@
     ],
     "_query_brand_campaign_master": "(((\"supertails\" OR \"super tails\" OR \"supertails.com\") AND NOT (\"sonic\" OR \"sega\" OR \"nintendo\" OR \"playstation\" OR \"xbox\" OR \"steam\" OR \"video game\" OR \"game\" OR \"mod\" OR \"rom\" OR \"fan art\" OR \"fanart\" OR \"cosplay\" OR \"miles prower\")) OR ((\"danish sait\" OR \"danishsait\") AND (\"pet\" OR \"dog\" OR \"cat\" OR \"bangalore\" OR \"bengaluru\" OR \"ad\" OR \"film\" OR \"campaign\" OR \"brand\")) OR (\"#supertails\" OR \"#supertailsbangalore\" OR \"#supertailsindia\" OR \"#supertailsad\" OR \"#danishsait\"))"
   },
+  "google_sheets": {
+    "_comment": "Unified Dashboard Google Sheet. Service account must be shared on the sheet as Viewer. Share with: supertails-dashboard@supertails-dashboard-492714.iam.gserviceaccount.com",
+    "service_account_key_path": "gsc_service_account.json",
+    "unified_dashboard_sheet_id": "1SyhkqX0ZagBsUa91c1xITot6N92rwuupp3Bc6Ny2uHg",
+    "spend_tab_name": "pmb",
+    "_tab_note": "Set spend_tab_name to the exact tab name in the sheet containing the daily spend table. Leave blank to auto-detect the first sheet.",
+    "date_col": 0,
+    "_date_col_note": "0-indexed column number for the date column (A=0)",
+    "perf_spend_col": 58,
+    "_perf_spend_col_note": "Column BG (0-indexed: 58) = Performance Spend",
+    "brand_spend_col": 60,
+    "_brand_spend_col_note": "Column BI (0-indexed: 60) = Brand Spend"
+  },
   "signals_configured": {
     "gsc": true,
     "ga4": true,
