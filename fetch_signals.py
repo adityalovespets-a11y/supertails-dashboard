@@ -71,7 +71,7 @@ SIGNAL_KEYS = [
 ]
 
 # Keys that are dicts (not parallel arrays) — preserved separately in merge
-DICT_KEYS = ["city_sessions", "city_list", "gsc_queries"]
+DICT_KEYS = ["city_sessions", "city_list", "gsc_queries", "campaign_daily"]
 
 def empty_store():
     store = {"schema_version": SCHEMA_VERSION, "last_fetched_to": None, "dates": []}
@@ -181,7 +181,7 @@ def merge_into_store(store, day_data: dict):
                 if new_store[k][j] is None:  # don't overwrite real data
                     new_store[k][j] = signals[k]
 
-    # Preserve dict-type keys (city_sessions, city_list, gsc_queries)
+    # Preserve dict-type keys (city_sessions, city_list, gsc_queries, campaign_daily)
     for k in DICT_KEYS:
         if k in store:
             new_store[k] = store[k]
@@ -546,25 +546,65 @@ def fetch_social_daily(config, start_date, end_date):
         def fetch_volume(search_id):
             if not search_id or str(search_id).startswith("SEARCH_ID"):
                 return {}
-            url = f"{base}/searches/{search_id}/analytics/volume"
-            params = {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z", "groupby": "day"}
-            try:
-                r = requests.get(url, headers=headers, params=params, timeout=30)
-            except Exception as e:
-                print(f"    ✗ Meltwater network error: {e}")
+            # Try both v3 endpoint patterns
+            endpoints = [
+                f"{base}/searches/{search_id}/analytics/volume",
+                f"{base}/searches/{search_id}/volume",
+            ]
+            params_variants = [
+                {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z", "groupby": "day"},
+                {"startDate": start_date, "endDate": end_date, "period": "daily"},
+            ]
+            r = None
+            for url in endpoints:
+                for params in params_variants:
+                    try:
+                        r = requests.get(url, headers=headers, params=params, timeout=30)
+                        if r.status_code == 200:
+                            break
+                    except Exception as e:
+                        print(f"    ✗ Meltwater network error ({url}): {e}")
+                        continue
+                if r is not None and r.status_code == 200:
+                    break
+            if r is None:
                 return {}
             if r.status_code == 404:
-                print(f"    ✗ Meltwater 404 — search_id {search_id} not found")
+                print(f"    ✗ Meltwater 404 — search_id {search_id} not found. Check search_id in config.json.")
+                return {}
+            if r.status_code == 401:
+                print(f"    ✗ Meltwater 401 — API key rejected. Regenerate key at Meltwater → Settings → API.")
+                return {}
+            if r.status_code == 403:
+                print(f"    ✗ Meltwater 403 — Access denied for search_id {search_id}. Check account permissions.")
                 return {}
             if r.status_code != 200:
-                print(f"    ✗ Meltwater search {search_id}: HTTP {r.status_code} — {r.text[:200]}")
+                print(f"    ✗ Meltwater search {search_id}: HTTP {r.status_code}")
+                print(f"    ✗ Response: {r.text[:400]}")
                 return {}
-            data = r.json()
-            # Handle both {'data': [...]} and {'volume': [...]} response shapes
-            items = data.get("data") or data.get("volume") or data.get("results") or []
+            try:
+                data = r.json()
+            except Exception:
+                print(f"    ✗ Meltwater: invalid JSON response: {r.text[:200]}")
+                return {}
+            # Handle multiple response shapes from different Meltwater API versions
+            items = (data.get("data") or data.get("volume") or data.get("results")
+                     or data.get("documents") or data.get("hits") or [])
             if not items:
-                print(f"    ⚠ Meltwater {search_id}: 200 OK but empty. Keys: {list(data.keys())}")
-            return {item.get("date","")[:10]: item.get("count", item.get("volume", 0)) for item in items}
+                print(f"    ⚠ Meltwater {search_id}: 200 OK but no items. Top-level keys: {list(data.keys())}")
+                if isinstance(data, list):
+                    items = data  # some endpoints return a bare list
+            if isinstance(items, list):
+                result = {}
+                for item in items:
+                    if not isinstance(item, dict): continue
+                    # Try different date field names
+                    d = (item.get("date") or item.get("day") or item.get("timestamp") or "")[:10]
+                    # Try different count field names
+                    v = item.get("count") or item.get("volume") or item.get("total") or item.get("value") or 0
+                    if d: result[d] = int(v)
+                return result
+            return {}
 
         brand = fetch_volume(ids.get("brand_campaign_master"))
         huft  = fetch_volume(ids.get("competitor_huft"))
@@ -801,17 +841,21 @@ def fetch_spend_daily(config):
                 continue
 
             if iso_date not in daily:
-                daily[iso_date] = {"brand_spend": 0.0, "perf_spend": 0.0}
+                daily[iso_date] = {"brand_spend": 0.0, "perf_spend": 0.0, "campaigns": {}}
 
+            camp_key = campaign[:80]  # truncate very long names
             if brand_kw.lower() in campaign.lower():
                 daily[iso_date]["brand_spend"] += spend
             else:
                 daily[iso_date]["perf_spend"]  += spend
+            # Track per-campaign totals
+            daily[iso_date]["campaigns"][camp_key] = daily[iso_date]["campaigns"].get(camp_key, 0.0) + spend
 
         # Convert floats to ints
         for d in daily:
             daily[d]["brand_spend"] = int(daily[d]["brand_spend"])
             daily[d]["perf_spend"]  = int(daily[d]["perf_spend"])
+            daily[d]["campaigns"]   = {k: int(v) for k, v in daily[d]["campaigns"].items()}
 
         print(f"    ✓ Spend: {len(daily)} days fetched (skipped {skipped} rows, {date_parse_failures} unparseable dates)")
         if daily:
@@ -887,6 +931,17 @@ def fetch_and_merge(config, store, start_date, end_date):
     merged = merge_into_store(store, day_data)
     if gsc_queries:
         merged["gsc_queries"] = gsc_queries
+    # Merge per-campaign spend (dict-key: date → {campaign: spend})
+    existing_campaign_daily = merged.get("campaign_daily", {})
+    for d, v in spend_daily.items():
+        camps = v.get("campaigns", {})
+        if camps:
+            if d not in existing_campaign_daily:
+                existing_campaign_daily[d] = camps
+            else:
+                for camp, spend_val in camps.items():
+                    existing_campaign_daily[d][camp] = spend_val  # overwrite with latest fetch
+    merged["campaign_daily"] = existing_campaign_daily
     return merged
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1167,6 +1222,36 @@ table.int-t td{padding:9px 10px;border-bottom:1px solid var(--border);vertical-a
 table.int-t tr:last-child td{border-bottom:none;}
 .int-sig{font-weight:600;}.int-act{color:var(--orange);font-weight:600;}
 footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
+
+/* ── TAB BAR ── */
+.tab-bar{background:var(--navy);display:flex;gap:0;padding:0 20px;border-bottom:2px solid rgba(255,255,255,.10);}
+.tab-btn{background:transparent;border:none;border-bottom:3px solid transparent;
+         color:rgba(255,255,255,.45);padding:11px 22px;font-size:12px;font-weight:700;
+         cursor:pointer;margin-bottom:-2px;transition:all .15s;letter-spacing:.4px;white-space:nowrap;}
+.tab-btn:hover{color:rgba(255,255,255,.8);}
+.tab-btn.active{color:#fff;border-bottom-color:var(--orange);}
+
+/* ── CAMPAIGN BREAKDOWN ── */
+.camp-table{width:100%;border-collapse:collapse;font-size:12px;}
+.camp-table th{text-align:left;padding:7px 10px;background:var(--bg);font-size:10px;font-weight:700;
+               letter-spacing:.8px;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);}
+.camp-table td{padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:middle;}
+.camp-table tr:last-child td{border-bottom:none;}
+.camp-tag{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:600;margin-right:5px;}
+.camp-bar{height:5px;border-radius:3px;min-width:2px;}
+
+/* ── INTELLIGENCE TAB ── */
+.guide-card{background:#fff;border-radius:var(--r);padding:20px 24px;border:1px solid var(--border);margin:0 28px 12px;}
+.guide-title{font-size:13px;font-weight:800;color:var(--navy);margin-bottom:14px;display:flex;align-items:center;gap:8px;}
+.guide-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+@media(max-width:800px){.guide-grid{grid-template-columns:1fr;}}
+.guide-item{background:var(--bg);border-radius:8px;padding:14px;}
+.guide-item-title{font-size:11px;font-weight:700;color:var(--navy);margin-bottom:6px;}
+.guide-item-body{font-size:11px;color:var(--muted);line-height:1.6;}
+.corr-dl-btn{background:transparent;border:1px solid rgba(255,255,255,.25);color:rgba(255,255,255,.7);
+             border-radius:6px;padding:4px 12px;font-size:10px;font-weight:700;cursor:pointer;
+             letter-spacing:.3px;transition:all .15s;}
+.corr-dl-btn:hover{background:rgba(255,255,255,.1);color:#fff;border-color:rgba(255,255,255,.45);}
 </style>
 </head>
 <body>
@@ -1189,6 +1274,15 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
     </div>
   </div>
 </header>
+
+<!-- TAB BAR -->
+<div class="tab-bar">
+  <button class="tab-btn active" id="tab-btn-dashboard" onclick="switchTab('dashboard')">📊 Dashboard</button>
+  <button class="tab-btn" id="tab-btn-intelligence" onclick="switchTab('intelligence')">🎯 Intelligence &amp; Signals</button>
+</div>
+
+<!-- ═══════════════════════ TAB 1 — DASHBOARD ═══════════════════════ -->
+<div id="tabContent-dashboard">
 
 <!-- VIEW CONTROLS (date range + granularity) -->
 <div class="controls">
@@ -1316,45 +1410,14 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
   </div>
 </div>
 
-<!-- INTELLIGENCE PANEL — freshness + summary + alerts + chat -->
-<div style="padding:10px 28px 4px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
-  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-    <span style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.5px;">DATA FRESHNESS</span>
-    <div id="freshnessSyncBar" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+<!-- CAMPAIGN SPEND BREAKDOWN (first fold — data tab) -->
+<div class="section" style="margin-top:10px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+    <div class="sec-title" style="margin-bottom:0;">Campaign Spend — <span id="campBreakLabel">Selected Period</span></div>
+    <span style="font-size:10px;color:var(--muted);">Brand vs Performance by campaign name</span>
   </div>
-  <span id="commonDateBadge" style="font-size:10px;font-weight:600;background:rgba(232,69,10,.12);color:#E8450A;padding:3px 10px;border-radius:10px;white-space:nowrap;">Analysis to: —</span>
-</div>
-
-<!-- SUMMARY + ALERTS + ACTIONS + CHAT -->
-<div style="display:grid;grid-template-columns:1fr 260px;gap:10px;padding:0 28px 10px;">
-  <!-- Left: summary + top 2 action cards -->
-  <div style="display:flex;flex-direction:column;gap:10px;">
-    <div style="background:#fff;border-radius:var(--r);padding:14px 16px;border:1px solid var(--border);">
-      <div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.5px;margin-bottom:6px;">SUMMARY</div>
-      <div id="narrativeText" style="font-size:12px;color:var(--text);line-height:1.65;"></div>
-    </div>
-    <div id="actionCards" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;"></div>
-  </div>
-  <!-- Right: alerts + chat -->
-  <div style="display:flex;flex-direction:column;gap:10px;">
-    <div style="background:#fff;border-radius:var(--r);padding:14px 16px;border:1px solid var(--border);">
-      <div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.5px;margin-bottom:8px;">ALERTS</div>
-      <div id="alertsList"></div>
-    </div>
-    <!-- Chat window -->
-    <div style="background:#fff;border-radius:var(--r);border:1px solid var(--border);display:flex;flex-direction:column;flex:1;min-height:280px;">
-      <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;">
-        <span style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.5px;">ASK YOUR DATA</span>
-      </div>
-      <div id="chatSuggestions" style="padding:8px 14px;display:flex;flex-wrap:wrap;gap:5px;border-bottom:1px solid var(--border);"></div>
-      <div id="chatMessages" style="flex:1;overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:8px;max-height:220px;"></div>
-      <div style="padding:8px 14px;border-top:1px solid var(--border);display:flex;gap:6px;">
-        <input id="chatInput" type="text" placeholder="Ask about the data…"
-          style="flex:1;border:1px solid var(--border);border-radius:6px;padding:6px 9px;font-size:11px;outline:none;"
-          onkeydown="if(event.key==='Enter')sendChatMsg()">
-        <button onclick="sendChatMsg()" style="background:var(--orange);color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;">Ask</button>
-      </div>
-    </div>
+  <div style="background:#fff;border-radius:var(--r);border:1px solid var(--border);overflow:hidden;">
+    <div id="campaignBreakTable" style="padding:0;"></div>
   </div>
 </div>
 
@@ -1442,7 +1505,10 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
 
 <!-- SIGNAL CORRELATION OVERLAY -->
 <div class="section" style="margin-top:12px;">
-  <div class="sec-title">Signal Correlation — Normalised Overlay</div>
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-wrap:wrap;gap:6px;">
+    <div class="sec-title" style="margin-bottom:0;">Signal Correlation — Normalised Overlay</div>
+    <button class="corr-dl-btn" onclick="downloadCorrCSV()">↓ Download Weekly CSV</button>
+  </div>
   <div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Each signal indexed to 100 = baseline average. Compare trends and lead/lag.</div>
   <div class="toggle-row" id="corrToggles">
     <button class="tog-btn active" data-key="branded_search"          onclick="toggleCorr(this)" style="--tc:#e8450a">Branded Search</button>
@@ -1479,6 +1545,97 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
     </div>
   </div>
 </div>
+
+</div><!-- /tabContent-dashboard -->
+
+<!-- ═══════════════════════ TAB 2 — INTELLIGENCE & SIGNALS ═══════════════════════ -->
+<div id="tabContent-intelligence" style="display:none;">
+
+<!-- HOW TO USE THIS DASHBOARD -->
+<div class="guide-card" style="margin-top:16px;">
+  <div class="guide-title">📖 How to Use This Dashboard</div>
+  <div class="guide-grid">
+    <div class="guide-item">
+      <div class="guide-item-title">📊 Dashboard Tab</div>
+      <div class="guide-item-body">Your primary daily view. Signal cards show the 4 key brand-lift indicators vs pre-campaign baseline. Use the date range and granularity controls to zoom in. Toggle signals on the correlation overlay to see what's moving together. Download the weekly CSV for offline analysis.</div>
+    </div>
+    <div class="guide-item">
+      <div class="guide-item-title">🎯 Intelligence Tab (this page)</div>
+      <div class="guide-item-body">Automated narrative, alerts, and action cards generated fresh on each data pull. The freshness bar shows how current each signal is. "Ask Your Data" lets you query the underlying numbers in plain English. Use this tab to decide what to act on each week.</div>
+    </div>
+    <div class="guide-item">
+      <div class="guide-item-title">📐 Four-Signal Framework</div>
+      <div class="guide-item-body"><b>Signal 1:</b> GSC Branded Search — intent indicator, leads installs by ~2 days.<br><b>Signal 2:</b> Organic Installs — lagging brand lift signal.<br><b>Signal 3:</b> Non-Paid Sessions — web interest without ad spend.<br><b>Signal 4:</b> Brand Mentions — social reach &amp; sentiment (Meltwater).</div>
+    </div>
+    <div class="guide-item">
+      <div class="guide-item-title">📏 Reading the Baseline</div>
+      <div class="guide-item-body">Baseline = Jan 5 – Mar 22 2026 (W01–W11), WTF Sale excluded. The signal cards show % above/below this baseline. Green = above threshold. Yellow = marginal. Red = below baseline. A sustained +15–20% on branded search is the first campaign lift indicator.</div>
+    </div>
+    <div class="guide-item">
+      <div class="guide-item-title">🏙️ Bangalore Delta</div>
+      <div class="guide-item-body">Digital signals are All-India. The Bangalore offline lift = Bangalore revenue above the India trend. Use the city filter on the Dashboard tab to view Bangalore-specific sessions. Compare Bangalore vs All-India spend efficiency using the spend cards.</div>
+    </div>
+    <div class="guide-item">
+      <div class="guide-item-title">🔄 Data Refresh</div>
+      <div class="guide-item-body">Run <code style="background:#f3f4f6;padding:1px 5px;border-radius:3px;font-size:10px;">python3 fetch_signals.py</code> daily to pull t-1 data. The dashboard auto-refreshes every 5 min if open. GSC has a 3-day processing lag. AppsFlyer data is loaded via CSV export. Spend updates every run from the linked Google Sheet.</div>
+    </div>
+  </div>
+</div>
+
+<!-- DATA FRESHNESS -->
+<div style="padding:10px 28px 4px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    <span style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.5px;">DATA FRESHNESS</span>
+    <div id="freshnessSyncBar" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+  </div>
+  <span id="commonDateBadge" style="font-size:10px;font-weight:600;background:rgba(232,69,10,.12);color:#E8450A;padding:3px 10px;border-radius:10px;white-space:nowrap;">Analysis to: —</span>
+</div>
+
+<!-- SUMMARY + ALERTS + ACTIONS + CHAT -->
+<div style="display:grid;grid-template-columns:1fr 300px;gap:10px;padding:0 28px 10px;">
+  <!-- Left: summary + action cards -->
+  <div style="display:flex;flex-direction:column;gap:10px;">
+    <div style="background:#fff;border-radius:var(--r);padding:14px 16px;border:1px solid var(--border);">
+      <div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.5px;margin-bottom:6px;">SUMMARY</div>
+      <div id="narrativeText" style="font-size:12px;color:var(--text);line-height:1.65;"></div>
+    </div>
+    <div id="actionCards" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;"></div>
+  </div>
+  <!-- Right: alerts + chat -->
+  <div style="display:flex;flex-direction:column;gap:10px;">
+    <div style="background:#fff;border-radius:var(--r);padding:14px 16px;border:1px solid var(--border);">
+      <div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.5px;margin-bottom:8px;">ALERTS</div>
+      <div id="alertsList"></div>
+    </div>
+    <!-- Chat window -->
+    <div style="background:#fff;border-radius:var(--r);border:1px solid var(--border);display:flex;flex-direction:column;flex:1;min-height:300px;">
+      <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;">
+        <span style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.5px;">ASK YOUR DATA</span>
+      </div>
+      <div id="chatSuggestions" style="padding:8px 14px;display:flex;flex-wrap:wrap;gap:5px;border-bottom:1px solid var(--border);"></div>
+      <div id="chatMessages" style="flex:1;overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:8px;max-height:260px;"></div>
+      <div style="padding:8px 14px;border-top:1px solid var(--border);display:flex;gap:6px;">
+        <input id="chatInput" type="text" placeholder="Ask about the data…"
+          style="flex:1;border:1px solid var(--border);border-radius:6px;padding:6px 9px;font-size:11px;outline:none;"
+          onkeydown="if(event.key==='Enter')sendChatMsg()">
+        <button onclick="sendChatMsg()" style="background:var(--orange);color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;">Ask</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- WEEKLY CORRELATION REPORT TABLE -->
+<div class="section" style="margin-top:4px;padding-bottom:16px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px;">
+    <div class="sec-title" style="margin-bottom:0;">Weekly Correlation Report</div>
+    <button class="corr-dl-btn" onclick="downloadCorrCSV()" style="background:var(--orange);border-color:var(--orange);color:#fff;">↓ Download CSV</button>
+  </div>
+  <div style="background:#fff;border-radius:var(--r);border:1px solid var(--border);overflow:auto;">
+    <div id="corrReportTable" style="padding:0;min-width:700px;"></div>
+  </div>
+</div>
+
+</div><!-- /tabContent-intelligence -->
 
 <div class="bot"></div>
 <footer>Supertails Brand Dashboard · All India · Confidential</footer>
@@ -1596,6 +1753,18 @@ document.getElementById('freshDate').textContent=S.last_fetched_to||'—';
     nc.innerHTML = '<div style="font-size:18px;">🔌</div><div style="font-size:12px;font-weight:600;color:#475569;">Not Connected</div><div style="font-size:10px;color:#94a3b8;">Meltwater plugin required</div>';
   }
 })();
+
+// ── Tab switching
+function switchTab(name){
+  ['dashboard','intelligence'].forEach(t=>{
+    const c=document.getElementById('tabContent-'+t);
+    const b=document.getElementById('tab-btn-'+t);
+    if(c) c.style.display = t===name?'block':'none';
+    if(b) b.classList.toggle('active', t===name);
+  });
+  // Render correlation table when intelligence tab opens
+  if(name==='intelligence' && currentSlice) renderCorrReportTable(currentSlice, gran);
+}
 
 // ── Auto-refresh countdown
 function toggleAutoRefresh(){
@@ -2125,6 +2294,13 @@ function renderDashboard(slice,g){
   renderSpend(slice, g);
   renderCorrelation(slice, g);
 
+  // Campaign breakdown (first fold, dashboard tab)
+  renderCampaignBreakdown(slice);
+
+  // If intelligence tab is open, re-render its correlation table too
+  const intTab = document.getElementById('tabContent-intelligence');
+  if(intTab && intTab.style.display !== 'none') renderCorrReportTable(slice, g);
+
   // SOV donut (latest data point in slice)
   renderSOV(slice);
 
@@ -2561,6 +2737,132 @@ if(logBody){
   });
   if(!(S.activation_log||[]).length)
     logBody.innerHTML='<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:18px">No activation events logged yet — add them in config.json</td></tr>';
+}
+
+// ── Campaign spend breakdown table (Dashboard tab, first fold)
+function renderCampaignBreakdown(slice){
+  const el=document.getElementById('campaignBreakTable');
+  if(!el) return;
+  const lbl=document.getElementById('campBreakLabel');
+  const campDaily=S.campaign_daily||{};
+  const totals={};
+  slice.dates.forEach(function(d){
+    var dc=campDaily[d]; if(!dc) return;
+    Object.entries(dc).forEach(function(pair){ totals[pair[0]]=(totals[pair[0]]||0)+pair[1]; });
+  });
+  const sorted=Object.entries(totals).sort(function(a,b){return b[1]-a[1];});
+  if(lbl && slice.dates.length) lbl.textContent=slice.dates[0]+' \u2013 '+slice.dates[slice.dates.length-1];
+  if(!sorted.length){
+    el.innerHTML='<div style="padding:14px 16px;font-size:12px;color:var(--muted);">No campaign spend data for this period. Data starts Feb 2026.</div>';
+    return;
+  }
+  const total=sorted.reduce(function(s,p){return s+p[1];},0);
+  var rows='';
+  sorted.forEach(function(pair){
+    var camp=pair[0], spend=pair[1];
+    var p=total>0?spend/total*100:0;
+    var isBrand=camp.toLowerCase().indexOf('brandmar')>=0;
+    var tagBg=isBrand?'#EDE9FE':'#FEE2E2';
+    var tagColor=isBrand?'#5b21b6':'#b91c1c';
+    var barColor=isBrand?'#7c3aed':'#dc2626';
+    rows+='<tr>'+
+      '<td style="padding:8px 10px;border-bottom:1px solid var(--border);">'+
+        '<span class="camp-tag" style="background:'+tagBg+';color:'+tagColor+'">'+(isBrand?'Brand':'Perf')+'</span>'+
+        '<span style="font-size:12px;">'+camp+'</span></td>'+
+      '<td style="padding:8px 10px;border-bottom:1px solid var(--border);text-align:right;font-weight:600;">\u20B9'+Math.round(spend).toLocaleString('en-IN')+'</td>'+
+      '<td style="padding:8px 10px;border-bottom:1px solid var(--border);text-align:right;color:var(--muted);font-size:11px;">'+p.toFixed(1)+'%</td>'+
+      '<td style="padding:8px 10px;border-bottom:1px solid var(--border);width:140px;">'+
+        '<div class="camp-bar" style="width:'+Math.max(2,Math.min(100,p))+'%;background:'+barColor+';"></div></td>'+
+    '</tr>';
+  });
+  rows+='<tr style="background:var(--bg);">'+
+    '<td style="padding:8px 10px;font-weight:700;font-size:12px;">Total</td>'+
+    '<td style="padding:8px 10px;text-align:right;font-weight:700;">\u20B9'+Math.round(total).toLocaleString('en-IN')+'</td>'+
+    '<td style="padding:8px 10px;text-align:right;color:var(--muted);">100%</td>'+
+    '<td></td></tr>';
+  el.innerHTML='<table class="camp-table"><thead><tr>'+
+    '<th>Campaign</th>'+
+    '<th style="text-align:right;">Spend (\u20B9)</th>'+
+    '<th style="text-align:right;">% of Total</th>'+
+    '<th style="width:140px;">Mix</th>'+
+  '</tr></thead><tbody>'+rows+'</tbody></table>';
+}
+
+// ── Weekly correlation report table (Intelligence tab)
+function renderCorrReportTable(slice, g){
+  const el=document.getElementById('corrReportTable');
+  if(!el) return;
+  const wg='W'; // always weekly
+  const weekData={};
+  CORR_DEFS.forEach(d=>{
+    const arr=slice[d.key]||[];
+    const {labels,values}=aggregate(slice.dates, arr, wg);
+    labels.forEach((l,i)=>{
+      if(!weekData[l]) weekData[l]={};
+      weekData[l][d.key]={raw:values[i], idx:indexArr([values[i]], d.base)[0]};
+    });
+  });
+  const weeks=Object.keys(weekData).sort();
+  if(!weeks.length){el.innerHTML='<div style="padding:14px;font-size:12px;color:var(--muted);">No data for selected period.</div>';return;}
+  const hdr=`<table style="width:100%;border-collapse:collapse;font-size:11px;">
+    <thead><tr>
+      <th style="text-align:left;padding:8px 10px;background:#f8fafc;font-size:10px;font-weight:700;letter-spacing:.6px;color:var(--muted);border-bottom:1px solid var(--border);white-space:nowrap;position:sticky;left:0;">Week</th>
+      ${CORR_DEFS.map(d=>`<th style="text-align:right;padding:8px 10px;background:#f8fafc;font-size:10px;font-weight:700;letter-spacing:.6px;color:${d.color};border-bottom:1px solid var(--border);white-space:nowrap;">${d.label}</th>`).join('')}
+    </tr></thead>
+    <tbody>${weeks.map((w,wi)=>{
+      const isAlt=wi%2===0;
+      const rowBg=isAlt?'#ffffff':'#fafafa';
+      return '<tr style="background:'+rowBg+'">'+
+        '<td style="padding:7px 10px;border-bottom:1px solid var(--border);font-weight:600;white-space:nowrap;position:sticky;left:0;background:'+rowBg+';">'+w+'</td>'+
+        CORR_DEFS.map(d=>{
+          const v=weekData[w]&&weekData[w][d.key];
+          const raw=v?v.raw:null;
+          const idx=v?v.idx:null;
+          const idxColor=idx==null?'var(--muted)':idx>=115?'#16a34a':idx>=95?'var(--text)':'#dc2626';
+          return '<td style="text-align:right;padding:7px 10px;border-bottom:1px solid var(--border);">'+
+            '<div style="font-weight:600;">'+(raw!=null?Math.round(raw).toLocaleString('en-IN'):'—')+'</div>'+
+            '<div style="font-size:9px;color:'+idxColor+';font-weight:700;">'+(idx!=null?'idx:'+idx:'—')+'</div>'+
+          '</td>';
+        }).join('')+
+      '</tr>';
+    }).join('')}
+    </tbody>
+  </table>`;
+  el.innerHTML=hdr;
+}
+
+// ── Download correlation data as CSV
+function downloadCorrCSV(){
+  const slice=currentSlice;
+  if(!slice){alert('Select a date range and click Apply first.');return;}
+  const wg='W';
+  const weekData={};
+  CORR_DEFS.forEach(d=>{
+    const arr=slice[d.key]||[];
+    const {labels,values}=aggregate(slice.dates, arr, wg);
+    labels.forEach((l,i)=>{
+      if(!weekData[l]) weekData[l]={};
+      weekData[l][d.key]={raw:values[i], idx:indexArr([values[i]], d.base)[0]};
+    });
+  });
+  const weeks=Object.keys(weekData).sort();
+  const rawHeader='Week,'+CORR_DEFS.map(d=>d.label+' (raw)').join(',');
+  const idxHeader=','+CORR_DEFS.map(d=>d.label+' (idx)').join(',');
+  const rows=[rawHeader+idxHeader];
+  weeks.forEach(w=>{
+    const raw=CORR_DEFS.map(d=>{const v=weekData[w]&&weekData[w][d.key];return v&&v.raw!=null?Math.round(v.raw):'';}).join(',');
+    const idx=CORR_DEFS.map(d=>{const v=weekData[w]&&weekData[w][d.key];return v&&v.idx!=null?v.idx:'';}).join(',');
+    rows.push(w+','+raw+','+idx);
+  });
+  const blob=new Blob([rows.join('\n')],{type:'text/csv'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download='supertails_weekly_correlation_'+new Date().toISOString().slice(0,10)+'.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 // ── Initial render (last 90 days)
@@ -3001,6 +3303,8 @@ def generate_dashboard(store, config, output_path="supertails_dashboard.html"):
     # Filter out noise/unresolved cities from the filter bar
     noise_cities = {"(not set)", "Ashburn", "(not set)"}
     store_out["city_list"]            = [c for c in store.get("city_list", []) if c not in noise_cities]
+    # Campaign-level spend breakdown
+    store_out["campaign_daily"]       = store.get("campaign_daily", {})
 
     # Check which signals are configured (credentials present)
     mw     = config.get("meltwater", {})
@@ -3056,6 +3360,13 @@ def run_once(config, full_refresh, output):
         spend_daily = fetch_spend_daily(config)
         if spend_daily:
             store = merge_into_store(store, spend_daily)
+            # Also refresh campaign_daily
+            existing_cd = store.get("campaign_daily", {})
+            for d, v in spend_daily.items():
+                camps = v.get("campaigns", {})
+                if camps:
+                    existing_cd[d] = camps
+            store["campaign_daily"] = existing_cd
             save_store(store)
     else:
         store = fetch_and_merge(config, store, start, end)
