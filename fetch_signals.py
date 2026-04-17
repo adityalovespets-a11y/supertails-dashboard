@@ -726,8 +726,8 @@ def fetch_spend_daily(config):
                 s = chr(65 + r) + s
             return s
 
-        col_letter = idx_to_col(max_col)
-        range_name = f"{tab_name}!A:{col_letter}" if tab_name else f"A:{col_letter}"
+        # Always fetch A:G only — columns beyond G are not needed
+        range_name = f"{tab_name}!A:G" if tab_name else "A:G"
 
         print(f"    → Sheet: {sheet_id[:20]}... | Tab: '{tab_name}' | Range: {range_name}")
         result = svc.spreadsheets().values().get(
@@ -770,20 +770,38 @@ def fetch_spend_daily(config):
 
         daily = {}
         skipped = 0
+        date_parse_failures = 0
+
         for row in rows:
-            if len(row) <= max_col:
+            # Extend short rows with empty strings so index access is safe
+            row = list(row) + [''] * (max(campaign_col, spend_col) + 1 - len(row))
+
+            raw_date = row[date_col]
+
+            # Skip rows where column A is blank — no forward-fill
+            if raw_date == '' or raw_date is None:
                 skipped += 1
                 continue
-            iso_date = parse_date(row[date_col])
-            campaign = str(row[campaign_col]).strip() if len(row) > campaign_col else ""
+
+            iso_date = parse_date(raw_date)
+            if not iso_date:
+                # Non-date in col A (header, label, total row) — skip silently
+                date_parse_failures += 1
+                continue
+
+            campaign = str(row[campaign_col]).strip()
             spend    = parse_num(row[spend_col])
 
-            if not iso_date or spend is None:
+            # Skip zero/null spend or header-like campaign names
+            if spend is None or spend == 0:
+                skipped += 1
+                continue
+            if campaign.lower() in ('campaign', 'campaignname', 'campaign name', 'bucket', ''):
                 skipped += 1
                 continue
 
             if iso_date not in daily:
-                daily[iso_date] = {"brand_spend": 0, "perf_spend": 0}
+                daily[iso_date] = {"brand_spend": 0.0, "perf_spend": 0.0}
 
             if brand_kw.lower() in campaign.lower():
                 daily[iso_date]["brand_spend"] += spend
@@ -795,12 +813,14 @@ def fetch_spend_daily(config):
             daily[d]["brand_spend"] = int(daily[d]["brand_spend"])
             daily[d]["perf_spend"]  = int(daily[d]["perf_spend"])
 
-        print(f"    ✓ Spend: {len(daily)} days fetched (skipped {skipped} rows)")
+        print(f"    ✓ Spend: {len(daily)} days fetched (skipped {skipped} rows, {date_parse_failures} unparseable dates)")
         if daily:
             ds = sorted(daily)
             print(f"    ✓ Spend date range: {ds[0]} → {ds[-1]}")
-            sample = next(iter(sorted(daily.items(), reverse=True)))
-            print(f"    ✓ Latest day sample: {sample[0]} → brand ₹{sample[1]['brand_spend']:,}  perf ₹{sample[1]['perf_spend']:,}")
+            sample = sorted(daily.items())[-1]
+            print(f"    ✓ Latest day: {sample[0]} → brand ₹{sample[1]['brand_spend']:,}  perf ₹{sample[1]['perf_spend']:,}")
+        else:
+            print(f"    ✗ Spend: 0 days fetched — check tab name, column positions, and date format")
         return daily
 
     except Exception as e:
