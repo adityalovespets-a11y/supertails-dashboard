@@ -3048,6 +3048,12 @@ def run_once(config, full_refresh, output):
     start, end = get_fetch_range(store, config, full_refresh)
     if start is None:
         print("  Already current to t-1. Regenerating dashboard from store...")
+        # Spend is a full-history pull — always re-fetch it regardless of date range
+        print("\n  [5/5] Spend (Google Sheet — always refreshed)")
+        spend_daily = fetch_spend_daily(config)
+        if spend_daily:
+            store = merge_into_store(store, spend_daily)
+            save_store(store)
     else:
         store = fetch_and_merge(config, store, start, end)
         save_store(store)
