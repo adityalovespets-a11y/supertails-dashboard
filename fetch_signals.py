@@ -677,18 +677,15 @@ def fetch_top_queries_gsc(config, windows=None):
 
 def fetch_spend_daily(config):
     """
-    Fetches brand spend (column BI) and performance spend (column BG) from the
-    Unified Dashboard - Supertails Google Sheet via the Sheets API.
+    Fetches brand spend and performance spend from the spend Google Sheet.
 
     Column layout (0-indexed):
-      col 0  (A)  = Date (DD/MM/YYYY format)
-      col 58 (BG) = Perf Spend (performance)
-      col 60 (BI) = Brand Spend (brand marketing)
+      col A (0) = Date
+      col C (2) = Campaign name — rows containing 'BrandMar' → brand_spend; all others → perf_spend
+      col E (4) = Spend amount
 
-    Requires the service account to have Viewer access on the sheet.
-    Share with: supertails-dashboard@supertails-dashboard-492714.iam.gserviceaccount.com
-
-    Returns { 'YYYY-MM-DD': {'brand_spend': int, 'perf_spend': int}, ... }
+    Groups by date, sums spend per bucket. Returns:
+      { 'YYYY-MM-DD': {'brand_spend': int, 'perf_spend': int}, ... }
     """
     import re
 
@@ -699,17 +696,19 @@ def fetch_spend_daily(config):
         gs_cfg   = config.get("google_sheets", {})
         key_path = gs_cfg.get("service_account_key_path") or \
                    config.get("google_search_console", {}).get("service_account_key_path")
-        sheet_id = gs_cfg.get("unified_dashboard_sheet_id",
-                               "1SyhkqX0ZagBsUa91c1xITot6N92rwuupp3Bc6Ny2uHg")
-        tab_name = gs_cfg.get("spend_tab_name", "")   # leave blank = first sheet
+        sheet_id = gs_cfg.get("unified_dashboard_sheet_id")
+        tab_name = gs_cfg.get("spend_tab_name", "")
 
-        # Column indices (0-based) — configurable, defaults to BG/BI
-        date_col       = int(gs_cfg.get("date_col",       0))
-        perf_spend_col = int(gs_cfg.get("perf_spend_col", 58))   # BG
-        brand_spend_col= int(gs_cfg.get("brand_spend_col", 60))  # BI
+        date_col     = int(gs_cfg.get("date_col",     0))   # A
+        campaign_col = int(gs_cfg.get("campaign_col", 2))   # C
+        spend_col    = int(gs_cfg.get("spend_col",    4))   # E
+        brand_kw     = gs_cfg.get("brand_campaign_contains", "BrandMar")
 
         if not key_path or str(key_path).startswith("YOUR_"):
-            print("    ℹ  Spend: no service account key — skipping Google Sheet fetch")
+            print("    ℹ  Spend: no service account key — skipping")
+            return {}
+        if not sheet_id:
+            print("    ℹ  Spend: no sheet ID configured — skipping")
             return {}
 
         creds = service_account.Credentials.from_service_account_file(
@@ -718,10 +717,8 @@ def fetch_spend_daily(config):
         )
         svc = build("sheets", "v4", credentials=creds)
 
-        # Fetch up to column BI (col index 60 = column "BI")
-        max_col = max(date_col, perf_spend_col, brand_spend_col)
+        max_col = max(date_col, campaign_col, spend_col)
         def idx_to_col(n):
-            """Convert 0-based column index to sheet column letter (A, B, ..., BG, BI)."""
             s = ""
             n += 1
             while n:
@@ -732,41 +729,41 @@ def fetch_spend_daily(config):
         col_letter = idx_to_col(max_col)
         range_name = f"{tab_name}!A:{col_letter}" if tab_name else f"A:{col_letter}"
 
-        print(f"    → Fetching sheet range {range_name} ...")
+        print(f"    → Sheet: {sheet_id[:20]}... | Tab: '{tab_name}' | Range: {range_name}")
         result = svc.spreadsheets().values().get(
             spreadsheetId=sheet_id,
             range=range_name,
-            valueRenderOption="UNFORMATTED_VALUE",   # get raw numbers, not formatted strings
+            valueRenderOption="UNFORMATTED_VALUE",
         ).execute()
 
         rows = result.get("values", [])
         if not rows:
-            print(f"    ✗ Spend: sheet returned no data (range: {range_name})")
+            print(f"    ✗ Spend: sheet returned no data")
             return {}
 
         def parse_num(v):
             if v is None or v == "": return None
             try:
-                return int(float(str(v).replace(",", "").strip()))
+                return float(str(v).replace(",", "").strip())
             except (ValueError, TypeError):
                 return None
 
         def parse_date(v):
-            """Handle DD/MM/YYYY string or Excel serial date number."""
             if v is None or v == "": return None
             sv = str(v).strip()
-            # DD/MM/YYYY string
+            # YYYY-MM-DD
+            if re.match(r'^\d{4}-\d{2}-\d{2}$', sv):
+                return sv
+            # DD/MM/YYYY
             m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', sv)
             if m:
                 return f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}"
-            # Excel serial (e.g. 45958.0)
+            # Excel serial
             try:
                 serial = float(sv)
-                if 40000 < serial < 60000:   # sanity: 2009–2064
+                if 40000 < serial < 60000:
                     from datetime import date as _d, timedelta as _td
-                    # Excel epoch: Dec 30 1899 (with leap year bug)
-                    epoch = _d(1899, 12, 30)
-                    return (epoch + _td(days=int(serial))).isoformat()
+                    return (_d(1899, 12, 30) + _td(days=int(serial))).isoformat()
             except ValueError:
                 pass
             return None
@@ -777,17 +774,33 @@ def fetch_spend_daily(config):
             if len(row) <= max_col:
                 skipped += 1
                 continue
-            iso_date   = parse_date(row[date_col])
-            perf_val   = parse_num(row[perf_spend_col])
-            brand_val  = parse_num(row[brand_spend_col])
+            iso_date = parse_date(row[date_col])
+            campaign = str(row[campaign_col]).strip() if len(row) > campaign_col else ""
+            spend    = parse_num(row[spend_col])
 
-            if iso_date and (perf_val or brand_val):
-                daily[iso_date] = {"perf_spend": perf_val, "brand_spend": brand_val}
+            if not iso_date or spend is None:
+                skipped += 1
+                continue
 
-        print(f"    ✓ Spend: {len(daily)} days fetched (skipped {skipped} short rows)")
+            if iso_date not in daily:
+                daily[iso_date] = {"brand_spend": 0, "perf_spend": 0}
+
+            if brand_kw.lower() in campaign.lower():
+                daily[iso_date]["brand_spend"] += spend
+            else:
+                daily[iso_date]["perf_spend"]  += spend
+
+        # Convert floats to ints
+        for d in daily:
+            daily[d]["brand_spend"] = int(daily[d]["brand_spend"])
+            daily[d]["perf_spend"]  = int(daily[d]["perf_spend"])
+
+        print(f"    ✓ Spend: {len(daily)} days fetched (skipped {skipped} rows)")
         if daily:
-            dates_sorted = sorted(daily)
-            print(f"    ✓ Spend date range: {dates_sorted[0]} → {dates_sorted[-1]}")
+            ds = sorted(daily)
+            print(f"    ✓ Spend date range: {ds[0]} → {ds[-1]}")
+            sample = next(iter(sorted(daily.items(), reverse=True)))
+            print(f"    ✓ Latest day sample: {sample[0]} → brand ₹{sample[1]['brand_spend']:,}  perf ₹{sample[1]['perf_spend']:,}")
         return daily
 
     except Exception as e:
@@ -1418,8 +1431,8 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
     <button class="tog-btn active" data-key="perf_sessions"           onclick="toggleCorr(this)" style="--tc:#ef4444">Performance</button>
     <button class="tog-btn active" data-key="direct_installs"         onclick="toggleCorr(this)" style="--tc:#f59e0b">Organic Installs</button>
     <button class="tog-btn active" data-key="revenue_india"           onclick="toggleCorr(this)" style="--tc:#14b8a6">India NMV</button>
-    <button class="tog-btn" data-key="brand_spend"                    onclick="toggleCorr(this)" style="--tc:#7c3aed">Brand Spend</button>
-    <button class="tog-btn" data-key="perf_spend"                     onclick="toggleCorr(this)" style="--tc:#dc2626">Perf Spend</button>
+    <button class="tog-btn active" data-key="brand_spend"             onclick="toggleCorr(this)" style="--tc:#7c3aed">Brand Spend</button>
+    <button class="tog-btn active" data-key="perf_spend"              onclick="toggleCorr(this)" style="--tc:#dc2626">Perf Spend</button>
   </div>
 </div>
 <div class="charts" style="grid-template-columns:1fr;">
@@ -1484,7 +1497,7 @@ let activeCity='all';
 let gran='W';
 let currentSlice=null;
 let sessTog=new Set(['total_nonpaid_sessions','total_paid_sessions']);
-let corrTog=new Set(['branded_search','direct_sessions','brand_paid_sessions','perf_sessions','direct_installs','revenue_india']);
+let corrTog=new Set(['branded_search','direct_sessions','brand_paid_sessions','perf_sessions','direct_installs','revenue_india','brand_spend','perf_spend']);
 
 // ── Helpers
 function fmt(n){return n==null?'—':Math.round(n).toLocaleString('en-IN');}

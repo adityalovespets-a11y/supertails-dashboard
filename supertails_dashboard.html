@@ -487,8 +487,8 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
     <button class="tog-btn active" data-key="perf_sessions"           onclick="toggleCorr(this)" style="--tc:#ef4444">Performance</button>
     <button class="tog-btn active" data-key="direct_installs"         onclick="toggleCorr(this)" style="--tc:#f59e0b">Organic Installs</button>
     <button class="tog-btn active" data-key="revenue_india"           onclick="toggleCorr(this)" style="--tc:#14b8a6">India NMV</button>
-    <button class="tog-btn" data-key="brand_spend"                    onclick="toggleCorr(this)" style="--tc:#7c3aed">Brand Spend</button>
-    <button class="tog-btn" data-key="perf_spend"                     onclick="toggleCorr(this)" style="--tc:#dc2626">Perf Spend</button>
+    <button class="tog-btn active" data-key="brand_spend"             onclick="toggleCorr(this)" style="--tc:#7c3aed">Brand Spend</button>
+    <button class="tog-btn active" data-key="perf_spend"              onclick="toggleCorr(this)" style="--tc:#dc2626">Perf Spend</button>
   </div>
 </div>
 <div class="charts" style="grid-template-columns:1fr;">
@@ -553,7 +553,7 @@ let activeCity='all';
 let gran='W';
 let currentSlice=null;
 let sessTog=new Set(['total_nonpaid_sessions','total_paid_sessions']);
-let corrTog=new Set(['branded_search','direct_sessions','brand_paid_sessions','perf_sessions','direct_installs','revenue_india']);
+let corrTog=new Set(['branded_search','direct_sessions','brand_paid_sessions','perf_sessions','direct_installs','revenue_india','brand_spend','perf_spend']);
 
 // ── Helpers
 function fmt(n){return n==null?'—':Math.round(n).toLocaleString('en-IN');}
