@@ -391,63 +391,65 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
   </div>
 </div>
 
-<!-- CAMPAIGN SPEND BREAKDOWN (first fold — data tab) -->
+<!-- 1 ─ BRAND CAMPAIGN SPEND -->
 <div class="section" style="margin-top:10px;">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
-    <div class="sec-title" style="margin-bottom:0;">Campaign Spend — <span id="campBreakLabel">Selected Period</span></div>
-    <span style="font-size:10px;color:var(--muted);">Brand vs Performance by campaign name</span>
+    <div class="sec-title" style="margin-bottom:0;">Brand Campaign Spend — <span id="campBreakLabel">Selected Period</span></div>
+    <span style="font-size:10px;color:var(--muted);">Meta &amp; Google · Brand campaigns only</span>
   </div>
   <div style="background:#fff;border-radius:var(--r);border:1px solid var(--border);overflow:hidden;">
     <div id="campaignBreakTable" style="padding:0;"></div>
   </div>
 </div>
 
-<!-- TREND CHARTS -->
-<div class="section" style="margin-top:12px;"><div class="sec-title">Trends — <span id="chartRangeLabel"></span></div></div>
-<div class="charts">
-  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Branded Search Volume</div><div class="csub">GSC · All India · Branded queries</div></div></div><div class="cwrap"><canvas id="ch1"></canvas></div></div>
-  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Non-Paid Sessions</div><div class="csub" id="sub_nonpaid">GA4 · All non-paid channels · <span id="sub_nonpaid_city">All India</span></div></div></div><div class="cwrap"><canvas id="ch_nonpaid"></canvas></div></div>
-  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Paid Sessions</div><div class="csub" id="sub_paid">GA4 · All paid channels · <span id="sub_paid_city">All India</span></div></div></div><div class="cwrap"><canvas id="ch_paid"></canvas></div></div>
-  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Organic Installs</div><div class="csub">AppsFlyer · All India · Organic only · Brand-driven signal</div></div></div><div class="cwrap"><canvas id="ch2"></canvas></div></div>
+<!-- 2 ─ SPEND TRENDS: Brand & Perf individual + Stacked comparison -->
+<div class="section" style="margin-top:14px;"><div class="sec-title">Spend Trends — Brand &amp; Performance</div></div>
+<div class="charts" style="grid-template-columns:1fr 1fr;">
+  <div class="ccrd">
+    <div class="ctop"><div><div class="ctitle">Brand Spend (BM) — Daily ₹</div><div class="csub">Google Sheet · d-1 · Brand Marketing</div></div></div>
+    <div class="cwrap"><canvas id="ch_brand_spend"></canvas></div>
+  </div>
+  <div class="ccrd">
+    <div class="ctop"><div><div class="ctitle">Performance Spend — Daily ₹</div><div class="csub">Google Sheet · d-1 · Performance campaigns</div></div></div>
+    <div class="cwrap"><canvas id="ch_perf_spend"></canvas></div>
+  </div>
 </div>
-<!-- PAID BREAKDOWN -->
-<div class="section" style="margin-top:12px;"><div class="sec-title">Paid Breakdown — <span id="paidBreakLabel"></span></div></div>
-<div class="charts">
-  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Brand Campaign Sessions</div><div class="csub">GA4 · Campaigns with "Brand" · All India</div></div></div><div class="cwrap"><canvas id="ch3"></canvas></div></div>
-</div>
-
-<!-- ORGANIC VS PAID INSTALLS -->
-<div class="section" style="margin-top:12px;"><div class="sec-title">Organic vs Paid Installs — <span id="instSplitRangeLabel"></span></div></div>
 <div class="charts" style="grid-template-columns:1fr;">
   <div class="ccrd">
     <div class="ctop">
-      <div><div class="ctitle">App Installs — Organic vs Paid</div><div class="csub">AppsFlyer · All India · Android + iOS · Organic = brand-driven, unattributed</div></div>
+      <div><div class="ctitle">Brand vs Performance Spend — Stacked</div><div class="csub" id="spendStackRangeLabel">Google Sheet · Daily total outlay</div></div>
+      <div id="spendSplitDisplay" style="font-size:11px;color:rgba(255,255,255,.6);"></div>
+    </div>
+    <div class="cwrap" style="height:240px;"><canvas id="ch_spend_stack"></canvas></div>
+  </div>
+</div>
+
+<!-- 3 ─ BRANDED SEARCH VOLUME -->
+<div class="section" style="margin-top:14px;"><div class="sec-title">Branded Search Volume — <span id="chartRangeLabel"></span></div></div>
+<div class="charts" style="grid-template-columns:1fr;">
+  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Branded Search Impressions</div><div class="csub">GSC · All India · Branded queries · 3-day lag</div></div></div><div class="cwrap" style="height:200px;"><canvas id="ch1"></canvas></div></div>
+</div>
+
+<!-- 4 ─ INSTALLS: Organic vs Paid -->
+<div class="section" style="margin-top:14px;"><div class="sec-title">App Installs — <span id="instSplitRangeLabel"></span></div></div>
+<div class="charts" style="grid-template-columns:1fr 1fr;">
+  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Organic Installs</div><div class="csub">AppsFlyer · All India · Organic only · Brand-driven signal</div></div></div><div class="cwrap"><canvas id="ch2"></canvas></div></div>
+  <div class="ccrd">
+    <div class="ctop">
+      <div><div class="ctitle">Organic vs Paid Installs</div><div class="csub">AppsFlyer · All India · Android + iOS</div></div>
       <div id="instSplitRatioDisplay" style="font-size:11px;color:var(--muted);text-align:right;"></div>
     </div>
-    <div class="cwrap" style="height:220px;"><canvas id="ch_inst_split"></canvas></div>
+    <div class="cwrap"><canvas id="ch_inst_split"></canvas></div>
   </div>
 </div>
 
-<!-- BRAND VS PERFORMANCE SESSIONS -->
-<div class="section" style="margin-top:12px;"><div class="sec-title">Brand vs Performance Sessions — <span id="bvpRangeLabel"></span></div></div>
-<div class="charts" style="grid-template-columns:1fr;">
-  <div class="ccrd">
-    <div class="ctop">
-      <div><div class="ctitle">Paid Sessions — Brand vs Performance</div><div class="csub">GA4 · Brand = campaigns with "Brand" · Performance = all other paid · All India</div></div>
-      <div id="bvpRatioDisplay" style="font-size:11px;color:var(--muted);text-align:right;"></div>
-    </div>
-    <div class="cwrap" style="height:220px;"><canvas id="ch_bvp"></canvas></div>
-  </div>
+<!-- 5 ─ SESSIONS: Non-Paid + Paid individual, then combined toggle -->
+<div class="section" style="margin-top:14px;"><div class="sec-title">Sessions</div></div>
+<div class="charts">
+  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Non-Paid Sessions</div><div class="csub" id="sub_nonpaid">GA4 · All non-paid channels · <span id="sub_nonpaid_city">All India</span></div></div></div><div class="cwrap"><canvas id="ch_nonpaid"></canvas></div></div>
+  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Paid Sessions</div><div class="csub" id="sub_paid">GA4 · All paid channels · <span id="sub_paid_city">All India</span></div></div></div><div class="cwrap"><canvas id="ch_paid"></canvas></div></div>
 </div>
-
-<!-- REVENUE CHART -->
-<div class="section" style="margin-top:12px;"><div class="sec-title">India NMV — <span id="revRangeLabel"></span></div></div>
-<div class="charts" style="grid-template-columns:1fr;">
-  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Daily / Weekly / Monthly Revenue (NMV)</div><div class="csub">All India · Supertails MCP · ₹</div></div></div><div class="cwrap" style="height:220px;"><canvas id="ch_rev"></canvas></div></div>
-</div>
-
-<!-- ALL SESSIONS — SINGLE TOGGLEABLE CHART -->
-<div class="section" style="margin-top:12px;">
+<div class="section" style="margin-top:10px;">
   <div class="sec-title">All Sessions — Combined View</div>
   <div class="toggle-row" id="sessToggles">
     <button class="tog-btn active" data-key="total_nonpaid_sessions" onclick="toggleSess(this)" style="--tc:#6366f1">Non-Paid</button>
@@ -459,33 +461,11 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
   </div>
 </div>
 <div class="charts" style="grid-template-columns:1fr;">
-  <div class="ccrd"><div class="ctop"><div><div class="ctitle">All Sessions</div><div class="csub" id="sub_all_sess">GA4 · All India · Select signals above</div></div></div><div class="cwrap" style="height:260px;"><canvas id="ch_all_sess"></canvas></div></div>
+  <div class="ccrd"><div class="ctop"><div><div class="ctitle">All Sessions — Combined</div><div class="csub" id="sub_all_sess">GA4 · All India · Toggle signals above</div></div></div><div class="cwrap" style="height:240px;"><canvas id="ch_all_sess"></canvas></div></div>
 </div>
 
-<!-- SPEND TRENDS -->
-<div class="section" style="margin-top:12px;"><div class="sec-title">Spend Trends — Brand &amp; Performance</div></div>
-<div class="charts" style="grid-template-columns:1fr 1fr;">
-  <div class="ccrd">
-    <div class="ctop"><div><div class="ctitle">Brand Spend (BM) — Daily ₹</div><div class="csub">Unified Dashboard · d-1 · Brand Marketing</div></div></div>
-    <div class="cwrap"><canvas id="ch_brand_spend"></canvas></div>
-  </div>
-  <div class="ccrd">
-    <div class="ctop"><div><div class="ctitle">Performance Spend — Daily ₹</div><div class="csub">Unified Dashboard · d-1 · Performance</div></div></div>
-    <div class="cwrap"><canvas id="ch_perf_spend"></canvas></div>
-  </div>
-</div>
-<div class="charts" style="grid-template-columns:1fr;">
-  <div class="ccrd">
-    <div class="ctop">
-      <div><div class="ctitle">Brand vs Performance Spend — Stacked</div><div class="csub" id="spendStackRangeLabel">Unified Dashboard · Daily total outlay</div></div>
-      <div id="spendSplitDisplay" style="font-size:11px;color:rgba(255,255,255,.6);"></div>
-    </div>
-    <div class="cwrap" style="height:240px;"><canvas id="ch_spend_stack"></canvas></div>
-  </div>
-</div>
-
-<!-- SIGNAL CORRELATION OVERLAY -->
-<div class="section" style="margin-top:12px;">
+<!-- 6 ─ SIGNAL CORRELATION -->
+<div class="section" style="margin-top:14px;">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-wrap:wrap;gap:6px;">
     <div class="sec-title" style="margin-bottom:0;">Signal Correlation — Normalised Overlay</div>
     <button class="corr-dl-btn" onclick="downloadCorrCSV()">↓ Download Weekly CSV</button>
@@ -506,8 +486,27 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
   <div class="ccrd"><div class="ctop"><div><div class="ctitle">Signal Correlation View</div><div class="csub">Indexed to 100 = baseline · Toggle signals above</div></div></div><div class="cwrap" style="height:280px;"><canvas id="ch_corr"></canvas></div></div>
 </div>
 
+<!-- 7 ─ ADDITIONAL CHARTS (revenue, brand vs perf sessions, paid breakdown, SOV) -->
+<div class="section" style="margin-top:14px;"><div class="sec-title">India NMV — <span id="revRangeLabel"></span></div></div>
+<div class="charts" style="grid-template-columns:1fr;">
+  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Daily / Weekly / Monthly Revenue (NMV)</div><div class="csub">All India · Supertails MCP · ₹</div></div></div><div class="cwrap" style="height:220px;"><canvas id="ch_rev"></canvas></div></div>
+</div>
+
+<div class="section" style="margin-top:14px;"><div class="sec-title">Paid Breakdown — <span id="paidBreakLabel"></span></div></div>
+<div class="charts">
+  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Brand Campaign Sessions</div><div class="csub">GA4 · Campaigns with "Brand" · All India</div></div></div><div class="cwrap"><canvas id="ch3"></canvas></div></div>
+  <div class="ccrd">
+    <div class="ctop">
+      <div><div class="ctitle">Brand vs Performance Sessions</div><div class="csub">GA4 · Brand = "Brand" campaigns · Perf = all other paid · All India</div></div>
+      <div id="bvpRatioDisplay" style="font-size:11px;color:var(--muted);text-align:right;"></div>
+    </div>
+    <div class="cwrap"><canvas id="ch_bvp"></canvas></div>
+  </div>
+</div>
+<div style="display:none;"><span id="bvpRangeLabel"></span></div>
+
 <!-- SOV + SENTIMENT -->
-<div class="section" style="margin-top:12px;"><div class="sec-title">Share of Voice & Sentiment — Latest data point</div></div>
+<div class="section" style="margin-top:14px;"><div class="sec-title">Share of Voice &amp; Sentiment — Latest data point</div></div>
 <div class="sov-row">
   <div class="sov-crd">
     <div class="ctitle" style="margin-bottom:12px;">Share of Voice vs Competitors</div>
@@ -672,10 +671,14 @@ document.getElementById('freshDate').textContent=S.last_fetched_to||'—';
   const hasGSC       = (S.branded_search||[]).some(v=>v!=null&&v>0);
   const hasGA4       = (S.total_nonpaid_sessions||[]).some(v=>v!=null&&v>0);
   const hasAF        = (S.direct_installs||[]).some(v=>v!=null&&v>0);
+  const hasSpend     = (S.brand_spend||[]).some(v=>v!=null&&v>0) || (S.perf_spend||[]).some(v=>v!=null&&v>0);
+  const hasRevenue   = (S.revenue_india||[]).some(v=>v!=null&&v>0);
   const signals = [
     {label:'GSC',        live: hasGSC,       wait: !hasGSC && !!cfg.gsc},
     {label:'GA4',        live: hasGA4,        wait: !hasGA4 && !!cfg.ga4},
     {label:'AppsFlyer',  live: hasAF,         wait: !hasAF  && !!cfg.appsflyer},
+    {label:'Spend',      live: hasSpend,      wait: !hasSpend},
+    {label:'Revenue',    live: hasRevenue,    wait: !hasRevenue},
     {label:'Meltwater',  live: hasMeltwater,  wait: !hasMeltwater && !!cfg.meltwater},
   ];
   const el = document.getElementById('signalStatus');
@@ -1720,7 +1723,7 @@ if(logBody){
     logBody.innerHTML='<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:18px">No activation events logged yet — add them in config.json</td></tr>';
 }
 
-// ── Campaign spend breakdown table (Dashboard tab, first fold)
+// ── Campaign spend breakdown table — Brand only, Meta / Google classified
 function renderCampaignBreakdown(slice){
   const el=document.getElementById('campaignBreakTable');
   if(!el) return;
@@ -1731,41 +1734,57 @@ function renderCampaignBreakdown(slice){
     var dc=campDaily[d]; if(!dc) return;
     Object.entries(dc).forEach(function(pair){ totals[pair[0]]=(totals[pair[0]]||0)+pair[1]; });
   });
-  const sorted=Object.entries(totals).sort(function(a,b){return b[1]-a[1];});
   if(lbl && slice.dates.length) lbl.textContent=slice.dates[0]+' \u2013 '+slice.dates[slice.dates.length-1];
-  if(!sorted.length){
-    el.innerHTML='<div style="padding:14px 16px;font-size:12px;color:var(--muted);">No campaign spend data for this period. Data starts Feb 2026.</div>';
+
+  // Keep ONLY brand campaigns (contain 'brandmar'), sort by spend desc
+  var brandCamps=Object.entries(totals).filter(function(p){
+    return p[0].toLowerCase().indexOf('brandmar')>=0;
+  }).sort(function(a,b){return b[1]-a[1];});
+
+  if(!brandCamps.length){
+    el.innerHTML='<div style="padding:14px 16px;font-size:12px;color:var(--muted);">No brand campaign spend data for this period. Data starts Feb 2026.</div>';
     return;
   }
-  const total=sorted.reduce(function(s,p){return s+p[1];},0);
+  const total=brandCamps.reduce(function(s,p){return s+p[1];},0);
+  // Totals by platform
+  var metaTotal=0, googleTotal=0, otherTotal=0;
   var rows='';
-  sorted.forEach(function(pair){
+  brandCamps.forEach(function(pair){
     var camp=pair[0], spend=pair[1];
     var p=total>0?spend/total*100:0;
-    var isBrand=camp.toLowerCase().indexOf('brandmar')>=0;
-    var tagBg=isBrand?'#EDE9FE':'#FEE2E2';
-    var tagColor=isBrand?'#5b21b6':'#b91c1c';
-    var barColor=isBrand?'#7c3aed':'#dc2626';
+    var cLow=camp.toLowerCase();
+    var isMeta=cLow.indexOf('meta')>=0;
+    var isGoogle=cLow.indexOf('google')>=0;
+    var platform=isMeta?'Meta':isGoogle?'Google':'Other';
+    var platBg=isMeta?'#EFF6FF':isGoogle?'#FFF7ED':'#F3F4F6';
+    var platColor=isMeta?'#1d4ed8':isGoogle?'#c2410c':'#374151';
+    if(isMeta) metaTotal+=spend; else if(isGoogle) googleTotal+=spend; else otherTotal+=spend;
     rows+='<tr>'+
       '<td style="padding:8px 10px;border-bottom:1px solid var(--border);">'+
-        '<span class="camp-tag" style="background:'+tagBg+';color:'+tagColor+'">'+(isBrand?'Brand':'Perf')+'</span>'+
+        '<span class="camp-tag" style="background:'+platBg+';color:'+platColor+'">'+platform+'</span>'+
         '<span style="font-size:12px;">'+camp+'</span></td>'+
       '<td style="padding:8px 10px;border-bottom:1px solid var(--border);text-align:right;font-weight:600;">\u20B9'+Math.round(spend).toLocaleString('en-IN')+'</td>'+
       '<td style="padding:8px 10px;border-bottom:1px solid var(--border);text-align:right;color:var(--muted);font-size:11px;">'+p.toFixed(1)+'%</td>'+
       '<td style="padding:8px 10px;border-bottom:1px solid var(--border);width:140px;">'+
-        '<div class="camp-bar" style="width:'+Math.max(2,Math.min(100,p))+'%;background:'+barColor+';"></div></td>'+
+        '<div class="camp-bar" style="width:'+Math.max(2,Math.min(100,p))+'%;background:#7c3aed;"></div></td>'+
     '</tr>';
   });
-  rows+='<tr style="background:var(--bg);">'+
-    '<td style="padding:8px 10px;font-weight:700;font-size:12px;">Total</td>'+
-    '<td style="padding:8px 10px;text-align:right;font-weight:700;">\u20B9'+Math.round(total).toLocaleString('en-IN')+'</td>'+
-    '<td style="padding:8px 10px;text-align:right;color:var(--muted);">100%</td>'+
+  // Platform summary footer
+  var footerParts=[];
+  if(metaTotal>0) footerParts.push('<span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:8px;height:8px;border-radius:2px;background:#1d4ed8;display:inline-block;"></span><b>Meta</b> \u20B9'+Math.round(metaTotal).toLocaleString('en-IN')+'</span>');
+  if(googleTotal>0) footerParts.push('<span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:8px;height:8px;border-radius:2px;background:#c2410c;display:inline-block;"></span><b>Google</b> \u20B9'+Math.round(googleTotal).toLocaleString('en-IN')+'</span>');
+  if(otherTotal>0) footerParts.push('<span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:8px;height:8px;border-radius:2px;background:#6b7280;display:inline-block;"></span><b>Other</b> \u20B9'+Math.round(otherTotal).toLocaleString('en-IN')+'</span>');
+  rows+='<tr style="background:#f8fafc;">'+
+    '<td style="padding:9px 10px;font-weight:700;font-size:12px;color:var(--navy);">'+
+      'Total Brand Spend&nbsp;&nbsp;<span style="font-weight:400;font-size:11px;color:var(--muted);display:inline-flex;gap:14px;">'+footerParts.join('')+'</span></td>'+
+    '<td style="padding:9px 10px;text-align:right;font-weight:700;">\u20B9'+Math.round(total).toLocaleString('en-IN')+'</td>'+
+    '<td style="padding:9px 10px;text-align:right;color:var(--muted);">100%</td>'+
     '<td></td></tr>';
   el.innerHTML='<table class="camp-table"><thead><tr>'+
     '<th>Campaign</th>'+
-    '<th style="text-align:right;">Spend (\u20B9)</th>'+
+    '<th style="text-align:right;">Brand Spend (\u20B9)</th>'+
     '<th style="text-align:right;">% of Total</th>'+
-    '<th style="width:140px;">Mix</th>'+
+    '<th style="width:140px;">Share</th>'+
   '</tr></thead><tbody>'+rows+'</tbody></table>';
 }
 
