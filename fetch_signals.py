@@ -67,6 +67,7 @@ SIGNAL_KEYS = [
     "brand_spend", "perf_spend",
     # Social / Meltwater
     "brand_mentions", "hashtag_mentions", "sov_percent", "negative_rate",
+    "negative_mentions",
     "competitor_huft", "competitor_wiggles", "competitor_petsutra",
 ]
 
@@ -497,16 +498,19 @@ def fetch_direct_web_daily(config, start_date, end_date):
 # SIGNAL 4 — SOCIAL MENTIONS & SOV (Meltwater, daily)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_social_daily(config, start_date, end_date):
+def fetch_social_daily(config, start_date, end_date, verbose=False):
     """
-    Fetches 5 Meltwater saved searches:
-      1. brand_campaign_master — Supertails brand + Bangalore campaign + Danish Sait + OOH (all-in-one)
-      2. competitor_huft       — Heads Up For Tails
-      3. competitor_wiggles    — Wiggles
-      4. competitor_petsutra   — Petsutra
-      5. negative_sentiment    — Supertails complaints / negative keywords
-    SOV = brand_campaign_master / (brand + huft + wiggles + petsutra) * 100
-    Negative rate = negative_sentiment / brand_campaign_master * 100
+    Fetches Meltwater saved searches via POST /v3/analytics/{search_id}/custom.
+
+    Correct API (v3 docs):
+      POST https://api.meltwater.com/v3/analytics/{search_id}/custom
+      Headers: apikey: {key}, Content-Type: application/json
+      Body:    { "start": "YYYY-MM-DDT00:00:00", "end": "YYYY-MM-DDT23:59:59",
+                 "tz": "Asia/Kolkata",
+                 "analysis": {"type": "date_histogram", "granularity": "day"} }
+      Response: { "analysis": [ {"key": "YYYY-MM-DD...", "document_count": N}, ... ] }
+
+    Standard accounts support up to 30 days per request; longer ranges are chunked.
     """
     try:
         mw = config["meltwater"]
@@ -515,96 +519,91 @@ def fetch_social_daily(config, start_date, end_date):
             print("    ✗ Meltwater: API key not configured")
             return {}
 
-        # Meltwater supports two auth styles — try x-user-key first, fall back to Bearer
         base = "https://api.meltwater.com/v3"
         ids  = mw.get("search_ids", {})
+        tz   = mw.get("timezone", "Asia/Kolkata")
 
-        # Probe auth style once using the master search ID
-        _probe_id = ids.get("brand_campaign_master", "")
-        _auth_header = None
-        if _probe_id and not str(_probe_id).startswith("SEARCH_ID"):
-            for _hdr in [{"x-user-key": api_key}, {"Authorization": f"Bearer {api_key}"}]:
-                _test = requests.get(
-                    f"{base}/searches/{_probe_id}/analytics/volume",
-                    headers={**_hdr, "Accept": "application/json"},
-                    params={"from": f"{start_date}T00:00:00Z", "to": f"{start_date}T23:59:59Z", "groupby": "day"},
-                    timeout=15
-                )
-                if _test.status_code != 401:
-                    _auth_header = {**_hdr, "Accept": "application/json"}
-                    print(f"    ✓ Meltwater auth: {list(_hdr.keys())[0]}")
-                    break
-            if _auth_header is None:
-                print("    ✗ Meltwater 401 — API key rejected by both auth methods.")
-                print("      Go to Meltwater → Settings → API → regenerate your key, then update config.json")
-                return {}
-        else:
-            _auth_header = {"x-user-key": api_key, "Accept": "application/json"}
+        headers = {
+            "apikey":       api_key,
+            "Content-Type": "application/json",
+            "Accept":       "application/json",
+        }
 
-        headers = _auth_header
+        def _date_chunks(s, e, chunk=28):
+            """Yield (chunk_start, chunk_end) pairs ≤ chunk days wide."""
+            cur = date.fromisoformat(s)
+            end_d = date.fromisoformat(e)
+            while cur <= end_d:
+                stop = min(cur + timedelta(days=chunk - 1), end_d)
+                yield cur.isoformat(), stop.isoformat()
+                cur = stop + timedelta(days=1)
 
         def fetch_volume(search_id):
+            """Return {date_str: count} for search_id over start_date→end_date."""
             if not search_id or str(search_id).startswith("SEARCH_ID"):
                 return {}
-            # Try both v3 endpoint patterns
-            endpoints = [
-                f"{base}/searches/{search_id}/analytics/volume",
-                f"{base}/searches/{search_id}/volume",
-            ]
-            params_variants = [
-                {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z", "groupby": "day"},
-                {"startDate": start_date, "endDate": end_date, "period": "daily"},
-            ]
-            r = None
-            for url in endpoints:
-                for params in params_variants:
-                    try:
-                        r = requests.get(url, headers=headers, params=params, timeout=30)
-                        if r.status_code == 200:
-                            break
-                    except Exception as e:
-                        print(f"    ✗ Meltwater network error ({url}): {e}")
-                        continue
-                if r is not None and r.status_code == 200:
-                    break
-            if r is None:
-                return {}
-            if r.status_code == 404:
-                print(f"    ✗ Meltwater 404 — search_id {search_id} not found. Check search_id in config.json.")
-                return {}
-            if r.status_code == 401:
-                print(f"    ✗ Meltwater 401 — API key rejected. Regenerate key at Meltwater → Settings → API.")
-                return {}
-            if r.status_code == 403:
-                print(f"    ✗ Meltwater 403 — Access denied for search_id {search_id}. Check account permissions.")
-                return {}
-            if r.status_code != 200:
-                print(f"    ✗ Meltwater search {search_id}: HTTP {r.status_code}")
-                print(f"    ✗ Response: {r.text[:400]}")
-                return {}
-            try:
-                data = r.json()
-            except Exception:
-                print(f"    ✗ Meltwater: invalid JSON response: {r.text[:200]}")
-                return {}
-            # Handle multiple response shapes from different Meltwater API versions
-            items = (data.get("data") or data.get("volume") or data.get("results")
-                     or data.get("documents") or data.get("hits") or [])
-            if not items:
-                print(f"    ⚠ Meltwater {search_id}: 200 OK but no items. Top-level keys: {list(data.keys())}")
-                if isinstance(data, list):
-                    items = data  # some endpoints return a bare list
-            if isinstance(items, list):
-                result = {}
+            url    = f"{base}/analytics/{search_id}/custom"
+            result = {}
+            for chunk_start, chunk_end in _date_chunks(start_date, end_date):
+                body = {
+                    "start":    f"{chunk_start}T00:00:00",
+                    "end":      f"{chunk_end}T23:59:59",
+                    "tz":       tz,
+                    "analysis": {"type": "date_histogram", "granularity": "day"},
+                }
+                try:
+                    r = requests.post(url, headers=headers, json=body, timeout=30)
+                except Exception as e:
+                    print(f"    ✗ Meltwater network error ({search_id}): {e}")
+                    return {}
+
+                if r.status_code == 401:
+                    print("    ✗ Meltwater 401 — API key rejected. Regenerate at Meltwater → Settings → API.")
+                    return {}
+                if r.status_code == 403:
+                    print(f"    ✗ Meltwater 403 — Access denied for search_id {search_id}. Check account permissions.")
+                    return {}
+                if r.status_code == 404:
+                    print(f"    ✗ Meltwater 404 — search_id {search_id} not found. Check config.json → meltwater.search_ids")
+                    return {}
+                if r.status_code == 422:
+                    print(f"    ✗ Meltwater 422 — Invalid request for {search_id}: {r.text[:300]}")
+                    return {}
+                if r.status_code != 200:
+                    print(f"    ✗ Meltwater {search_id}: HTTP {r.status_code} → {r.text[:400]}")
+                    return {}
+
+                try:
+                    data = r.json()
+                except Exception:
+                    print(f"    ✗ Meltwater {search_id}: invalid JSON → {r.text[:200]}")
+                    return {}
+
+                if verbose:
+                    print(f"    [raw {search_id} {chunk_start}..{chunk_end}] keys: {list(data.keys())[:8]}")
+
+                # Response: {"result": {"document_count": N, "analysis": [{"key": "...", "document_count": N}, ...]}}
+                # Also handles bare {"analysis": [...]} shape
+                items = (data.get("result", {}).get("analysis")
+                         or data.get("analysis")
+                         or [])
+                if not items and isinstance(data, list):
+                    items = data
+                if not items:
+                    print(f"    ⚠ Meltwater {search_id} ({chunk_start}..{chunk_end}): 200 OK but 0 items. "
+                          f"Top-level keys: {list(data.keys())}")
+
                 for item in items:
-                    if not isinstance(item, dict): continue
-                    # Try different date field names
-                    d = (item.get("date") or item.get("day") or item.get("timestamp") or "")[:10]
-                    # Try different count field names
-                    v = item.get("count") or item.get("volume") or item.get("total") or item.get("value") or 0
-                    if d: result[d] = int(v)
-                return result
-            return {}
+                    if not isinstance(item, dict):
+                        continue
+                    # "key" is an ISO timestamp; take first 10 chars for YYYY-MM-DD
+                    raw_key = (item.get("key") or item.get("date") or item.get("day") or "")
+                    d = str(raw_key)[:10]
+                    v = (item.get("document_count") or item.get("count")
+                         or item.get("volume") or item.get("total") or 0)
+                    if d:
+                        result[d] = result.get(d, 0) + int(v)
+            return result
 
         brand = fetch_volume(ids.get("brand_campaign_master"))
         huft  = fetch_volume(ids.get("competitor_huft"))
@@ -622,7 +621,8 @@ def fetch_social_daily(config, start_date, end_date):
             total_sov = b + h + w + p
             daily[d] = {
                 "brand_mentions":      b,
-                "hashtag_mentions":    b,   # same search covers hashtags; split if needed later
+                "hashtag_mentions":    b,
+                "negative_mentions":   n,
                 "competitor_huft":     h,
                 "competitor_wiggles":  w,
                 "competitor_petsutra": p,
@@ -636,6 +636,101 @@ def fetch_social_daily(config, start_date, end_date):
     except Exception as e:
         print(f"    ✗ Meltwater failed: {e}")
         return {}
+
+
+def test_meltwater(config):
+    """
+    Standalone Meltwater diagnostic — run with:  python3 fetch_signals.py --test-meltwater
+    Tests the correct v3 endpoint: POST /v3/analytics/{search_id}/custom
+    Prints full request/response so you can confirm data shape and debug issues.
+    """
+    import json as _json
+    mw        = config.get("meltwater", {})
+    api_key   = mw.get("api_key", "")
+    ids       = mw.get("search_ids", {})
+    master_id = ids.get("brand_campaign_master", "")
+    tz        = mw.get("timezone", "Asia/Kolkata")
+
+    print("\n══════════════════════════════════════════════")
+    print("  MELTWATER API DIAGNOSTIC  (v3 correct endpoint)")
+    print("══════════════════════════════════════════════")
+    print(f"  API key    : {'✓ (' + api_key[:6] + '…)' if api_key and not api_key.startswith('YOUR_') else '✗ NOT SET'}")
+    print(f"  search_id  : {master_id or '✗ NOT SET'}")
+    print(f"  timezone   : {tz}")
+    print()
+
+    if not api_key or api_key.startswith("YOUR_"):
+        print("  → Set api_key in config.json → meltwater"); return
+    if not master_id or str(master_id).startswith("SEARCH_ID"):
+        print("  → Set search_ids.brand_campaign_master in config.json → meltwater"); return
+
+    base     = "https://api.meltwater.com/v3"
+    today    = date.today().isoformat()
+    week_ago = (date.today() - timedelta(days=7)).isoformat()
+
+    # ── Correct v3 endpoint ───────────────────────────────────────────────────
+    url  = f"{base}/analytics/{master_id}/custom"
+    body = {
+        "start":    f"{week_ago}T00:00:00",
+        "end":      f"{today}T23:59:59",
+        "tz":       tz,
+        "analysis": {"type": "date_histogram", "granularity": "day"},
+    }
+    hdrs = {"apikey": api_key, "Content-Type": "application/json", "Accept": "application/json"}
+
+    print(f"  POST {url}")
+    print(f"  Body: {_json.dumps(body, indent=4)}")
+    print()
+
+    try:
+        r = requests.post(url, headers=hdrs, json=body, timeout=20)
+        print(f"  HTTP {r.status_code}")
+        if r.status_code == 200:
+            try:
+                data = r.json()
+                result_block = data.get("result", {})
+                items = (result_block.get("analysis")
+                         or data.get("analysis")
+                         or [])
+                total_docs = result_block.get("document_count") or data.get("document_count") or "?"
+                print(f"  ✅ SUCCESS — top-level keys: {list(data.keys())}")
+                print(f"  Total mentions in period: {total_docs}")
+                print(f"  Daily buckets returned  : {len(items)}")
+                if items:
+                    print(f"  Sample (first 3 days):")
+                    for row in items[:3]:
+                        print(f"    {_json.dumps(row)}")
+                print()
+                print("  ✅ Meltwater is working. Run  python3 fetch_signals.py  to backfill brand_mentions.")
+                # Also list other search IDs
+                unconfigured = [k for k,v in ids.items() if str(v).startswith("SEARCH_ID")]
+                if unconfigured:
+                    print(f"\n  ⚠ These search_ids are still placeholders (SOV won't work until set):")
+                    for k in unconfigured:
+                        print(f"    config.json → meltwater.search_ids.{k}")
+            except Exception:
+                print(f"  Response (not JSON): {r.text[:400]}")
+        elif r.status_code == 401:
+            print("  ✗ 401 Unauthorized — API key rejected.")
+            print("    → Regenerate at: Meltwater app → Settings → API Access")
+            print(f"    Response: {r.text[:300]}")
+        elif r.status_code == 403:
+            print("  ✗ 403 Forbidden — account may not have API access enabled.")
+            print(f"    Response: {r.text[:300]}")
+        elif r.status_code == 404:
+            print(f"  ✗ 404 Not Found — search_id {master_id} doesn't exist.")
+            print("    → In Meltwater, open your saved search. The ID is in the URL.")
+            print(f"    Response: {r.text[:300]}")
+        elif r.status_code == 422:
+            print(f"  ✗ 422 Unprocessable — request body rejected.")
+            print(f"    Response: {r.text[:400]}")
+        else:
+            print(f"  Response: {r.text[:400]}")
+    except Exception as e:
+        print(f"  ✗ Connection error: {e}")
+        print("    Check your internet connection and try again.")
+
+    print("══════════════════════════════════════════════\n")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SIGNAL 1b — TOP BRANDED QUERIES (GSC, snapshot for multiple windows)
@@ -921,6 +1016,7 @@ def fetch_and_merge(config, store, start_date, end_date):
             "perf_spend":            spend.get("perf_spend"),
             "brand_mentions":        soc.get("brand_mentions"),
             "hashtag_mentions":      soc.get("hashtag_mentions"),
+            "negative_mentions":     soc.get("negative_mentions"),
             "sov_percent":           soc.get("sov_percent"),
             "negative_rate":         soc.get("negative_rate"),
             "competitor_huft":       soc.get("competitor_huft"),
@@ -1001,6 +1097,7 @@ def generate_demo_store():
             "revenue_india":            noise(int(lift(B["revenue_india"],           dsc, 0.25) * wknd), 0.08),
             "brand_mentions":           None,
             "hashtag_mentions":         None,
+            "negative_mentions":        None,
             "sov_percent":              None,
             "negative_rate":            None,
             "competitor_huft":          hu,
@@ -1138,12 +1235,21 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
 .section{padding:20px 28px 0;}
 .sec-title{font-size:10px;font-weight:700;letter-spacing:1.2px;color:var(--muted);
            text-transform:uppercase;margin-bottom:12px;}
+.sec-hdr{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
+.sec-hdr-num{width:22px;height:22px;border-radius:50%;background:var(--orange);
+             color:#fff;font-size:10px;font-weight:800;display:flex;align-items:center;
+             justify-content:center;flex-shrink:0;line-height:1;}
+.sec-hdr-label{font-size:10px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;
+               color:var(--muted);}
 
 /* SIGNAL CARDS */
 .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:16px 28px 0;}
 @media(max-width:900px){.cards{grid-template-columns:repeat(2,1fr);}}
 .card{background:var(--card);border-radius:var(--r);padding:18px;
-      border:1px solid var(--border);position:relative;overflow:hidden;}
+      border:1px solid var(--border);position:relative;overflow:hidden;
+      box-shadow:0 1px 4px rgba(0,0,0,.06),0 4px 12px rgba(0,0,0,.04);}
+.spark-wrap{height:36px;margin-top:8px;position:relative;}
+.spark-wrap canvas{display:block;}
 .s-bar{position:absolute;top:0;left:0;right:0;height:4px;}
 .s-bar.green{background:var(--green)}.s-bar.yellow{background:var(--yellow)}
 .s-bar.red{background:var(--red)}.s-bar.grey{background:var(--grey)}
@@ -1176,13 +1282,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
 .cmp-d{font-size:11px;font-weight:700;padding:2px 7px;border-radius:20px;}
 
 /* CHARTS */
-.charts{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:12px 28px 0;}
+.charts{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;padding:12px 28px 0;}
 @media(max-width:900px){.charts{grid-template-columns:1fr;}}
-.ccrd{background:var(--card);border-radius:var(--r);padding:18px;border:1px solid var(--border);}
+.ccrd{background:var(--card);border-radius:var(--r);padding:18px;border:1px solid var(--border);
+      box-shadow:0 1px 4px rgba(0,0,0,.06),0 4px 12px rgba(0,0,0,.04);}
 .ctop{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;}
 .ctitle{font-size:12px;font-weight:700;}
 .csub{font-size:10px;color:var(--muted);margin-top:2px;}
-.cwrap{position:relative;height:175px;}
+.cwrap{position:relative;height:220px;}
 
 /* SOV + SENTIMENT */
 .sov-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 28px 0;}
@@ -1345,6 +1452,7 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
     <div><span class="sval" id="v1">—</span><span class="sunit" id="su1">impressions/wk</span></div>
     <div class="smeta"><span class="sbase" id="bl1">Baseline: —</span><span class="sdelta" id="d1">—</span></div>
     <div class="scmp" id="cmp1"></div>
+    <div class="spark-wrap"><canvas id="spark1" height="36"></canvas></div>
     <div class="stool">Google Search Console · All India</div>
     <div class="sfresh" id="fr1">—</div>
   </div>
@@ -1354,6 +1462,7 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
     <div><span class="sval" id="v2">—</span><span class="sunit" id="su2">installs/wk</span></div>
     <div class="smeta"><span class="sbase" id="bl2">Baseline: —</span><span class="sdelta" id="d2">—</span></div>
     <div class="scmp" id="cmp2"></div>
+    <div class="spark-wrap"><canvas id="spark2" height="36"></canvas></div>
     <div class="stool">AppsFlyer · All India · Organic only · Brand signal</div>
     <div class="sfresh" id="fr2">—</div>
   </div>
@@ -1363,6 +1472,7 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
     <div><span class="sval" id="v3">—</span><span class="sunit" id="su3">sessions/wk</span></div>
     <div class="smeta"><span class="sbase" id="bl3">Baseline: —</span><span class="sdelta" id="d3">—</span></div>
     <div class="scmp" id="cmp3"></div>
+    <div class="spark-wrap"><canvas id="spark3" height="36"></canvas></div>
     <div class="stool">GA4 · All non-paid channels · All India</div>
     <div class="sfresh" id="fr3">—</div>
   </div>
@@ -1372,6 +1482,7 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
     <div><span class="sval" id="v4">—</span><span class="sunit" id="su4">mentions/wk</span></div>
     <div class="smeta"><span class="sbase" id="bl4">Baseline: —</span><span class="sdelta" id="d4">—</span></div>
     <div class="scmp" id="cmp4"></div>
+    <div class="spark-wrap"><canvas id="spark4" height="36"></canvas></div>
     <div class="stool">Meltwater · Instagram, X, Reddit, LinkedIn</div>
     <div class="sfresh" id="fr4">—</div>
     <div id="c4_nc" style="display:none;position:absolute;inset:0;background:rgba(241,245,249,0.92);border-radius:12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;">
@@ -1379,6 +1490,36 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
       <div style="font-size:12px;font-weight:600;color:#475569;">Not Connected</div>
       <div style="font-size:10px;color:#94a3b8;">Meltwater plugin required</div>
     </div>
+  </div>
+</div>
+
+<!-- MELTWATER DETAIL CARDS -->
+<div class="cards" style="margin-top:6px;grid-template-columns:repeat(3,1fr);">
+  <div class="card" id="c_neg_mentions">
+    <div class="s-bar" id="b_neg_mentions" style="background:var(--red);"></div>
+    <div class="stitle">Negative Mentions</div>
+    <div><span class="sval" id="v_neg_mentions">—</span><span class="sunit" id="su_neg_mentions">mentions/wk</span></div>
+    <div class="smeta"><span class="sbase" id="bl_neg_mentions" style="color:var(--muted);">Raw negative volume</span><span class="sdelta" id="d_neg_mentions">—</span></div>
+    <div class="spark-wrap"><canvas id="spark_neg" height="36"></canvas></div>
+    <div class="stool">Meltwater · Negative sentiment search · daily count</div>
+    <div class="sfresh" id="fr_neg_mentions">—</div>
+  </div>
+  <div class="card" id="c_neg_rate_detail">
+    <div class="s-bar" id="b_neg_rate_detail" style="background:var(--red);"></div>
+    <div class="stitle">Negative Rate</div>
+    <div><span class="sval" id="v_neg_rate_detail" style="font-size:22px;">—</span><span class="sunit">%</span></div>
+    <div class="smeta"><span class="sbase" style="color:var(--muted);">Alert threshold: 15%</span><span class="sdelta" id="d_neg_rate_detail">—</span></div>
+    <div class="stool">Negative mentions / Brand mentions · Meltwater</div>
+    <div class="sfresh" id="fr_neg_rate">—</div>
+  </div>
+  <div class="card" id="c_huft">
+    <div class="s-bar" id="b_huft" style="background:var(--navy-light);"></div>
+    <div class="stitle">HUFT Mentions</div>
+    <div><span class="sval" id="v_huft">—</span><span class="sunit" id="su_huft">mentions/wk</span></div>
+    <div class="smeta"><span class="sbase" id="bl_huft" style="color:var(--muted);">Competitor signal</span></div>
+    <div class="spark-wrap"><canvas id="spark_huft" height="36"></canvas></div>
+    <div class="stool">Meltwater · Heads Up For Tails · competitor tracking</div>
+    <div class="sfresh" id="fr_huft">—</div>
   </div>
 </div>
 
@@ -1413,7 +1554,10 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
 <!-- 1 ─ BRAND CAMPAIGN SPEND -->
 <div class="section" style="margin-top:10px;">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
-    <div class="sec-title" style="margin-bottom:0;">Brand Campaign Spend — <span id="campBreakLabel">Selected Period</span></div>
+    <div class="sec-hdr" style="margin-bottom:0;">
+      <div class="sec-hdr-num">1</div>
+      <div class="sec-hdr-label">Brand Campaign Spend — <span id="campBreakLabel">Selected Period</span></div>
+    </div>
     <span style="font-size:10px;color:var(--muted);">Meta &amp; Google · Brand campaigns only</span>
   </div>
   <div style="background:#fff;border-radius:var(--r);border:1px solid var(--border);overflow:hidden;">
@@ -1422,7 +1566,9 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
 </div>
 
 <!-- 2 ─ SPEND TRENDS: Brand & Perf individual + Stacked comparison -->
-<div class="section" style="margin-top:14px;"><div class="sec-title">Spend Trends — Brand &amp; Performance</div></div>
+<div class="section" style="margin-top:14px;">
+  <div class="sec-hdr"><div class="sec-hdr-num">2</div><div class="sec-hdr-label">Spend Trends — Brand &amp; Performance</div></div>
+</div>
 <div class="charts" style="grid-template-columns:1fr 1fr;">
   <div class="ccrd">
     <div class="ctop"><div><div class="ctitle">Brand Spend (BM) — Daily ₹</div><div class="csub">Google Sheet · d-1 · Brand Marketing</div></div></div>
@@ -1444,13 +1590,17 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
 </div>
 
 <!-- 3 ─ BRANDED SEARCH VOLUME -->
-<div class="section" style="margin-top:14px;"><div class="sec-title">Branded Search Volume — <span id="chartRangeLabel"></span></div></div>
+<div class="section" style="margin-top:14px;">
+  <div class="sec-hdr"><div class="sec-hdr-num">3</div><div class="sec-hdr-label">Branded Search Volume — <span id="chartRangeLabel"></span></div></div>
+</div>
 <div class="charts" style="grid-template-columns:1fr;">
-  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Branded Search Impressions</div><div class="csub">GSC · All India · Branded queries · 3-day lag</div></div></div><div class="cwrap" style="height:200px;"><canvas id="ch1"></canvas></div></div>
+  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Branded Search Impressions</div><div class="csub">GSC · All India · Branded queries · 3-day lag</div></div></div><div class="cwrap" style="height:240px;"><canvas id="ch1"></canvas></div></div>
 </div>
 
 <!-- 4 ─ INSTALLS: Organic vs Paid -->
-<div class="section" style="margin-top:14px;"><div class="sec-title">App Installs — <span id="instSplitRangeLabel"></span></div></div>
+<div class="section" style="margin-top:14px;">
+  <div class="sec-hdr"><div class="sec-hdr-num">4</div><div class="sec-hdr-label">App Installs — <span id="instSplitRangeLabel"></span></div></div>
+</div>
 <div class="charts" style="grid-template-columns:1fr 1fr;">
   <div class="ccrd"><div class="ctop"><div><div class="ctitle">Organic Installs</div><div class="csub">AppsFlyer · All India · Organic only · Brand-driven signal</div></div></div><div class="cwrap"><canvas id="ch2"></canvas></div></div>
   <div class="ccrd">
@@ -1463,7 +1613,9 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
 </div>
 
 <!-- 5 ─ SESSIONS: Non-Paid + Paid individual, then combined toggle -->
-<div class="section" style="margin-top:14px;"><div class="sec-title">Sessions</div></div>
+<div class="section" style="margin-top:14px;">
+  <div class="sec-hdr"><div class="sec-hdr-num">5</div><div class="sec-hdr-label">Sessions</div></div>
+</div>
 <div class="charts">
   <div class="ccrd"><div class="ctop"><div><div class="ctitle">Non-Paid Sessions</div><div class="csub" id="sub_nonpaid">GA4 · All non-paid channels · <span id="sub_nonpaid_city">All India</span></div></div></div><div class="cwrap"><canvas id="ch_nonpaid"></canvas></div></div>
   <div class="ccrd"><div class="ctop"><div><div class="ctitle">Paid Sessions</div><div class="csub" id="sub_paid">GA4 · All paid channels · <span id="sub_paid_city">All India</span></div></div></div><div class="cwrap"><canvas id="ch_paid"></canvas></div></div>
@@ -1480,13 +1632,13 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
   </div>
 </div>
 <div class="charts" style="grid-template-columns:1fr;">
-  <div class="ccrd"><div class="ctop"><div><div class="ctitle">All Sessions — Combined</div><div class="csub" id="sub_all_sess">GA4 · All India · Toggle signals above</div></div></div><div class="cwrap" style="height:240px;"><canvas id="ch_all_sess"></canvas></div></div>
+  <div class="ccrd"><div class="ctop"><div><div class="ctitle">All Sessions — Combined</div><div class="csub" id="sub_all_sess">GA4 · All India · Toggle signals above</div></div></div><div class="cwrap" style="height:260px;"><canvas id="ch_all_sess"></canvas></div></div>
 </div>
 
 <!-- 6 ─ SIGNAL CORRELATION -->
 <div class="section" style="margin-top:14px;">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-wrap:wrap;gap:6px;">
-    <div class="sec-title" style="margin-bottom:0;">Signal Correlation — Normalised Overlay</div>
+    <div class="sec-hdr" style="margin-bottom:0;"><div class="sec-hdr-num">6</div><div class="sec-hdr-label">Signal Correlation — Normalised Overlay</div></div>
     <button class="corr-dl-btn" onclick="downloadCorrCSV()">↓ Download Weekly CSV</button>
   </div>
   <div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Each signal indexed to 100 = baseline average. Compare trends and lead/lag.</div>
@@ -1502,16 +1654,20 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
   </div>
 </div>
 <div class="charts" style="grid-template-columns:1fr;">
-  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Signal Correlation View</div><div class="csub">Indexed to 100 = baseline · Toggle signals above</div></div></div><div class="cwrap" style="height:280px;"><canvas id="ch_corr"></canvas></div></div>
+  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Signal Correlation View</div><div class="csub">Indexed to 100 = baseline · Toggle signals above</div></div></div><div class="cwrap" style="height:300px;"><canvas id="ch_corr"></canvas></div></div>
 </div>
 
 <!-- 7 ─ ADDITIONAL CHARTS (revenue, brand vs perf sessions, paid breakdown, SOV) -->
-<div class="section" style="margin-top:14px;"><div class="sec-title">India NMV — <span id="revRangeLabel"></span></div></div>
+<div class="section" style="margin-top:14px;">
+  <div class="sec-hdr"><div class="sec-hdr-num">7</div><div class="sec-hdr-label">India NMV — <span id="revRangeLabel"></span></div></div>
+</div>
 <div class="charts" style="grid-template-columns:1fr;">
   <div class="ccrd"><div class="ctop"><div><div class="ctitle">Daily / Weekly / Monthly Revenue (NMV)</div><div class="csub">All India · Supertails MCP · ₹</div></div></div><div class="cwrap" style="height:220px;"><canvas id="ch_rev"></canvas></div></div>
 </div>
 
-<div class="section" style="margin-top:14px;"><div class="sec-title">Paid Breakdown — <span id="paidBreakLabel"></span></div></div>
+<div class="section" style="margin-top:14px;">
+  <div class="sec-hdr"><div class="sec-hdr-num">8</div><div class="sec-hdr-label">Paid Breakdown — <span id="paidBreakLabel"></span></div></div>
+</div>
 <div class="charts">
   <div class="ccrd"><div class="ctop"><div><div class="ctitle">Brand Campaign Sessions</div><div class="csub">GA4 · Campaigns with "Brand" · All India</div></div></div><div class="cwrap"><canvas id="ch3"></canvas></div></div>
   <div class="ccrd">
@@ -1525,7 +1681,9 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
 <div style="display:none;"><span id="bvpRangeLabel"></span></div>
 
 <!-- SOV + SENTIMENT -->
-<div class="section" style="margin-top:14px;"><div class="sec-title">Share of Voice &amp; Sentiment — Latest data point</div></div>
+<div class="section" style="margin-top:14px;">
+  <div class="sec-hdr"><div class="sec-hdr-num">9</div><div class="sec-hdr-label">Share of Voice &amp; Sentiment — Latest data point</div></div>
+</div>
 <div class="sov-row">
   <div class="sov-crd">
     <div class="ctitle" style="margin-bottom:12px;">Share of Voice vs Competitors</div>
@@ -2058,6 +2216,7 @@ function sliceByDate(start,end){
     brand_spend:         sl(S.brand_spend),
     perf_spend:          sl(S.perf_spend),
     brand_mentions:      sl(S.brand_mentions),
+    negative_mentions:   sl(S.negative_mentions),
     sov_percent:         sl(S.sov_percent),
     negative_rate:       sl(S.negative_rate),
     competitor_huft:     sl(S.competitor_huft),
@@ -2071,7 +2230,7 @@ function sliceByDate(start,end){
 function fmtDay(d){ const dt=new Date(d+'T00:00:00'); return dt.getDate()+' '+MO[dt.getMonth()]; }
 
 function aggregate(dates,values,g){
-  if(g==='D') return{labels:dates.map(d=>fmtDay(d)),values,counts:values.map(v=>v!=null?1:0)};
+  if(g==='D') return{labels:dates.map(d=>fmtDay(d)),values,counts:values.map(v=>v!=null?1:0),sortKeys:dates};
 
   const grp={}; // sortKey → {label, vals[], count}
   dates.forEach((d,i)=>{
@@ -2099,35 +2258,102 @@ function aggregate(dates,values,g){
     const v=grp[k].vals.filter(x=>x!=null);
     return v.length ? v.reduce((a,b)=>a+b,0) : null;
   });
-  return{labels,values:agg,counts};
+  return{labels,values:agg,counts,sortKeys:keys};
+}
+
+// ── Campaign-start annotation plugin (registered once)
+(function(){
+  if(Chart.registry && Chart.registry.plugins && Chart.registry.plugins.get('csLine')) return;
+  Chart.register({
+    id:'csLine',
+    afterDatasetsDraw(chart){
+      const idx=chart.options._csIdx;
+      if(idx==null||idx<0) return;
+      const meta=chart.getDatasetMeta(0);
+      if(!meta||!meta.data||!meta.data[idx]) return;
+      const x=meta.data[idx].x;
+      const {top,bottom}=chart.chartArea;
+      const ctx2=chart.ctx;
+      ctx2.save();
+      ctx2.beginPath();
+      ctx2.setLineDash([5,4]);
+      ctx2.strokeStyle='#E8450A';
+      ctx2.lineWidth=1.5;
+      ctx2.globalAlpha=0.7;
+      ctx2.moveTo(x,top);
+      ctx2.lineTo(x,bottom);
+      ctx2.stroke();
+      ctx2.globalAlpha=1;
+      ctx2.setLineDash([]);
+      // Small label
+      ctx2.fillStyle='#E8450A';
+      ctx2.font='bold 9px sans-serif';
+      ctx2.textAlign='center';
+      ctx2.fillText('▲ Campaign', x, bottom+12);
+      ctx2.restore();
+    }
+  });
+})();
+
+// ── Compute campaign-start bucket index from aggregate sortKeys
+function csIdx(sortKeys, g){
+  if(!cs || !sortKeys || !sortKeys.length) return -1;
+  if(g==='D') return sortKeys.indexOf(cs);
+  // For W/M: find which bucket cs falls into
+  const csDate=new Date(cs+'T00:00:00');
+  for(let i=0;i<sortKeys.length;i++){
+    const bStart=new Date(sortKeys[i]+'T00:00:00');
+    let bEnd;
+    if(g==='W'){
+      bEnd=new Date(bStart); bEnd.setDate(bStart.getDate()+6);
+    } else {
+      bEnd=new Date(bStart.getFullYear(), bStart.getMonth()+1, 0);
+    }
+    if(csDate>=bStart && csDate<=bEnd) return i;
+  }
+  return -1;
 }
 
 // ── Chart engine
-function mkChart(id,labels,datasets){
+function mkChart(id,labels,datasets,opts){
   if(CI[id]){CI[id].destroy();delete CI[id];}
-  const ctx=document.getElementById(id).getContext('2d');
+  const el=document.getElementById(id); if(!el) return;
+  const ctx=el.getContext('2d');
+  const isCurrency=opts&&opts.currency;
+  const annotation=opts&&opts.csIdx!=null?opts.csIdx:-1;
   CI[id]=new Chart(ctx,{
     type:'line',
     data:{labels,datasets},
     options:{
       responsive:true,maintainAspectRatio:false,
       interaction:{mode:'index',intersect:false},
+      _csIdx: annotation,
       plugins:{
         legend:{display:datasets.length>1,position:'top',
                 labels:{font:{size:10},boxWidth:10,padding:6}},
-        tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.parsed.y!=null?Math.round(c.parsed.y).toLocaleString('en-IN'):'—'}`}}
+        tooltip:{callbacks:{
+          label:c=>{
+            const v=c.parsed.y;
+            if(v==null) return c.dataset.label+': —';
+            if(isCurrency) return c.dataset.label+': \u20B9'+Math.round(v).toLocaleString('en-IN');
+            return c.dataset.label+': '+Math.round(v).toLocaleString('en-IN');
+          }
+        }}
       },
       scales:{
-        x:{grid:{display:false},ticks:{font:{size:9},maxRotation:45,maxTicksLimit:12}},
-        y:{grid:{color:'#F3F4F6'},ticks:{font:{size:9}},beginAtZero:false}
+        x:{grid:{display:false},ticks:{font:{size:9},maxRotation:45,maxTicksLimit:14}},
+        y:{grid:{color:'#F3F4F6'},ticks:{
+          font:{size:9},beginAtZero:false,
+          callback: isCurrency ? v=>(v>=100000?'\u20B9'+(v/100000).toFixed(1)+'L':v>=1000?'\u20B9'+(v/1000).toFixed(0)+'k':'\u20B9'+v) : v=>(v>=100000?(v/100000).toFixed(1)+'L':v>=1000?(v/1000).toFixed(0)+'k':v)
+        }}
       }
     }
   });
 }
 function ds(data,label,color,bg,dash){
-  return{label,data,borderColor:color,backgroundColor:bg,borderWidth:2.5,
-         pointRadius:allDates.length>90?0:3,pointBackgroundColor:color,
-         fill:true,tension:0.3,borderDash:dash||[]};
+  return{label,data,borderColor:color,backgroundColor:bg,borderWidth:2,
+         pointRadius:allDates.length>90?0:2.5,pointHoverRadius:5,pointBackgroundColor:color,
+         fill:true,tension:0.35,borderDash:dash||[]};
 }
 function baseds(val,len){
   return{label:'Baseline',data:Array(len).fill(val),borderColor:GREY_C,borderWidth:1.5,
@@ -2144,6 +2370,32 @@ function updateCard(vi,bli,di,bi,cmpi,avgVal,baseline,threshold){
   del.textContent=p==null?'No data':(p>=0?'+':'')+p.toFixed(1)+'% vs baseline';
   del.className='sdelta '+cls;
   document.getElementById(bi).className='s-bar '+cls;
+}
+
+// ── Mini-sparklines for signal cards
+const SPARK_CI={};
+function renderSparkline(canvasId, arr, color){
+  const el=document.getElementById(canvasId); if(!el) return;
+  // Take last 28 daily values
+  const vals=(arr||[]).slice(-28);
+  const labels=vals.map((_,i)=>'');
+  if(SPARK_CI[canvasId]){SPARK_CI[canvasId].destroy();delete SPARK_CI[canvasId];}
+  SPARK_CI[canvasId]=new Chart(el.getContext('2d'),{
+    type:'line',
+    data:{labels,datasets:[{
+      data:vals, borderColor:color, backgroundColor:color+'22',
+      borderWidth:1.5, pointRadius:0, fill:true, tension:0.4
+    }]},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      animation:false,
+      plugins:{legend:{display:false},tooltip:{enabled:false}},
+      scales:{
+        x:{display:false},
+        y:{display:false,beginAtZero:false}
+      }
+    }
+  });
 }
 
 // ── Main render
@@ -2254,22 +2506,22 @@ function renderDashboard(slice,g){
                       label:'Paid Sessions',               color:'#ef4444'},
   ];
   charts.forEach(c=>{
-    const {labels,values}=aggregate(slice.dates,c.arr,g);
+    const {labels,values,sortKeys}=aggregate(slice.dates,c.arr,g);
     const color=c.color||ORANGE;
     const bg=color+'26';
-    mkChart(c.id,labels,[ds(values,c.label,color,bg),baseds(c.base,labels.length)]);
+    mkChart(c.id,labels,[ds(values,c.label,color,bg),baseds(c.base,labels.length)],{csIdx:csIdx(sortKeys,g)});
   });
 
   // Installs chart — Total + Organic as two series
   {
-    const {labels:iL, values:totV} = aggregate(slice.dates, slice.total_installs, g);
-    const {values:orgV}            = aggregate(slice.dates, slice.direct_installs, g);
+    const {labels:iL, values:totV, sortKeys:iSK} = aggregate(slice.dates, slice.total_installs, g);
+    const {values:orgV}                           = aggregate(slice.dates, slice.direct_installs, g);
     const orgBase = baselines.direct_installs_india||baselines.direct_installs_bangalore||0;
     mkChart('ch2', iL, [
       ds(totV, 'Total Installs',   '#f59e0b', '#f59e0b26'),
       ds(orgV, 'Organic Installs', '#fb923c', '#fb923c26'),
       baseds(orgBase, iL.length),
-    ]);
+    ],{csIdx:csIdx(iSK,g)});
   }
 
   // Paid breakdown sub-charts (Brand)
@@ -2278,17 +2530,89 @@ function renderDashboard(slice,g){
                label:'Brand Campaign Sessions', color:'#8b5cf6'},
   ];
   paidBreak.forEach(c=>{
-    const {labels,values}=aggregate(slice.dates,c.arr,g);
+    const {labels,values,sortKeys}=aggregate(slice.dates,c.arr,g);
     const bg=c.color+'26';
-    mkChart(c.id,labels,[ds(values,c.label,c.color,bg),baseds(c.base,labels.length)]);
+    mkChart(c.id,labels,[ds(values,c.label,c.color,bg),baseds(c.base,labels.length)],{csIdx:csIdx(sortKeys,g)});
   });
 
   // Revenue chart
-  const {labels:revL, values:revV} = aggregate(slice.dates, slice.revenue_india, g);
+  const {labels:revL, values:revV, sortKeys:revSK} = aggregate(slice.dates, slice.revenue_india, g);
   const revBase = g==='W' ? baselines.revenue_india_weekly||0
                 : g==='M' ? (baselines.revenue_india_weekly||0)*30/7
                 : baselines.revenue_india_daily||0;
-  mkChart('ch_rev', revL, [ds(revV,'India NMV (₹)','#14b8a6','#14b8a622'), baseds(revBase, revL.length)]);
+  mkChart('ch_rev', revL, [ds(revV,'India NMV (\u20B9)','#14b8a6','#14b8a622'), baseds(revBase, revL.length)],{currency:true,csIdx:csIdx(revSK,g)});
+
+  // Sparklines — 28-day daily trend on signal cards
+  renderSparkline('spark1',    slice.branded_search,        ORANGE);
+  renderSparkline('spark2',    slice.direct_installs,       '#fb923c');
+  renderSparkline('spark3',    slice.total_nonpaid_sessions,'#6366f1');
+  renderSparkline('spark4',    slice.brand_mentions,        '#22c55e');
+  renderSparkline('spark_neg', slice.negative_mentions,     '#dc2626');
+  renderSparkline('spark_huft',slice.competitor_huft,       '#1B2A3B');
+
+  // ── Meltwater detail cards ───────────────────────────────────────────────
+  (function(){
+    const negMentions = granVal(slice.negative_mentions);
+    const negRate     = slice.negative_rate.filter(x=>x!=null).slice(-1)[0];
+    const huftMentions= granVal(slice.competitor_huft);
+
+    // Negative mentions card
+    const vnm = document.getElementById('v_neg_mentions');
+    if(vnm) vnm.textContent = negMentions!=null ? fmt(negMentions) : '—';
+    const snm = document.getElementById('su_neg_mentions');
+    if(snm) snm.textContent = 'mentions/'+unitSuffix;
+    const dnm = document.getElementById('d_neg_mentions');
+    if(dnm){
+      if(negRate!=null){
+        const cls = negRate>=15?'red':negRate>=8?'yellow':'green';
+        dnm.textContent = negRate.toFixed(1)+'% neg. rate';
+        dnm.className = 'sdelta '+cls;
+      } else {
+        dnm.textContent = 'No data'; dnm.className = 'sdelta grey';
+      }
+    }
+
+    // Negative rate detail card
+    const vnr = document.getElementById('v_neg_rate_detail');
+    if(vnr) vnr.textContent = negRate!=null ? negRate.toFixed(1) : '—';
+    const dnr = document.getElementById('d_neg_rate_detail');
+    if(dnr){
+      const cls = negRate==null?'grey':negRate>=15?'red':negRate>=8?'yellow':'green';
+      dnr.textContent = negRate==null?'No data':negRate>=15?'⚠ Above threshold':negRate>=8?'Watch':'✓ Normal';
+      dnr.className = 'sdelta '+cls;
+    }
+    const bnr = document.getElementById('b_neg_rate_detail');
+    if(bnr){
+      const cls = negRate==null?'grey':negRate>=15?'red':negRate>=8?'yellow':'green';
+      bnr.style.background = negRate>=15?'var(--red)':negRate>=8?'var(--yellow)':'var(--green)';
+    }
+
+    // HUFT card
+    const vh = document.getElementById('v_huft');
+    if(vh) vh.textContent = huftMentions!=null ? fmt(huftMentions) : '—';
+    const sh = document.getElementById('su_huft');
+    if(sh) sh.textContent = 'mentions/'+unitSuffix;
+    const bh = document.getElementById('b_huft');
+    if(bh) bh.style.background = 'var(--navy-light)';
+
+    // Freshness tags
+    function lastMWDate(arr){
+      for(let i=(arr||[]).length-1;i>=0;i--){if(arr[i]!=null&&arr[i]>0)return (S.dates||[])[i];}
+      return null;
+    }
+    function setMWFresh(id, dateStr){
+      const el=document.getElementById(id); if(!el) return;
+      if(!dateStr){el.textContent='No data';el.className='sfresh old';return;}
+      const today2=new Date(); today2.setHours(0,0,0,0);
+      const d=new Date(dateStr+'T00:00:00');
+      const days=Math.round((today2-d)/(1000*60*60*24));
+      el.textContent='Data to: '+dateStr+' ('+days+'d ago)';
+      el.className='sfresh '+(days<=2?'fresh':days<=5?'stale':'old');
+    }
+    setMWFresh('fr_neg_mentions', lastMWDate(S.negative_mentions));
+    setMWFresh('fr_neg_rate',     lastMWDate(S.negative_rate));
+    setMWFresh('fr_huft',         lastMWDate(S.competitor_huft));
+  })();
 
   // Re-render the combo charts using current toggle states
   renderAllSessions(slice, g);
@@ -2307,7 +2631,7 @@ function renderDashboard(slice,g){
   // SOV donut (latest data point in slice)
   renderSOV(slice);
 
-  // Negative alert
+  // Negative alert — fire if rate ≥ 15%
   const lastNeg=slice.negative_rate.filter(x=>x!=null).slice(-1)[0];
   document.getElementById('negAlert').classList.toggle('hidden',!(lastNeg>=15));
   document.getElementById('negRateVal').textContent=lastNeg!=null?fmtD(lastNeg)+'%':'—';
@@ -2332,16 +2656,18 @@ function toggleSess(btn){
 
 function renderAllSessions(slice, g){
   const datasets=[];
+  let lastSK=null;
   SESS_DEFS.forEach(d=>{
     if(!sessTog.has(d.key)) return;
     const arr=slice[d.key]||[];
-    const {labels,values}=aggregate(slice.dates, arr, g);
+    const {labels,values,sortKeys}=aggregate(slice.dates, arr, g);
     datasets.push(ds(values, d.label, d.color, d.color+'22'));
-    // store labels from last valid def
     renderAllSessions._labels = labels;
+    lastSK = sortKeys;
   });
   const labels = renderAllSessions._labels || slice.dates.map(d=>d.slice(5));
-  mkChart('ch_all_sess', labels, datasets.length ? datasets : [{label:'No signals selected',data:[],borderColor:'transparent'}]);
+  mkChart('ch_all_sess', labels, datasets.length ? datasets : [{label:'No signals selected',data:[],borderColor:'transparent'}],
+    {csIdx:csIdx(lastSK,g)});
 }
 
 // ── Brand vs Performance Sessions stacked bar ────────────────────────────────
@@ -2459,9 +2785,9 @@ function renderSpend(slice, g){
     const color = key==='brand_spend' ? '#7c3aed' : '#dc2626';
     const label = key==='brand_spend' ? 'Brand Spend (\u20B9)' : 'Perf Spend (\u20B9)';
     const arr = slice[key]||[];
-    const {labels, values} = aggregate(slice.dates, arr, g);
+    const {labels, values, sortKeys} = aggregate(slice.dates, arr, g);
     if(!hasSpend){ if(CI[chartId]){CI[chartId].destroy();delete CI[chartId];} return; }
-    mkChart(chartId, labels, [ds(values, label, color, color+'22')]);
+    mkChart(chartId, labels, [ds(values, label, color, color+'22')], {currency:true, csIdx:csIdx(sortKeys,g)});
   });
 
   const {labels, values: brandVals} = aggregate(slice.dates, slice.brand_spend||[], g);
@@ -2546,17 +2872,20 @@ function indexArr(values, base){
 function renderCorrelation(slice, g){
   const datasets=[];
   let sharedLabels=null;
+  let sharedSK=null;
   CORR_DEFS.forEach(d=>{
     if(!corrTog.has(d.key)) return;
     const arr=slice[d.key]||[];
-    const {labels,values}=aggregate(slice.dates, arr, g);
-    if(!sharedLabels) sharedLabels=labels;
+    const {labels,values,sortKeys}=aggregate(slice.dates, arr, g);
+    if(!sharedLabels){sharedLabels=labels; sharedSK=sortKeys;}
     const indexed = indexArr(values, d.base);
     const d2=ds(indexed, d.label, d.color, 'transparent');
     d2.fill=false; // no fill for overlay — just lines
+    d2.borderWidth=2;
     datasets.push(d2);
   });
   const labels = sharedLabels || slice.dates.map(d=>d.slice(5));
+  const annotIdx = csIdx(sharedSK, g);
 
   if(CI['ch_corr']){CI['ch_corr'].destroy();delete CI['ch_corr'];}
   const ctx=document.getElementById('ch_corr').getContext('2d');
@@ -2566,9 +2895,10 @@ function renderCorrelation(slice, g){
     options:{
       responsive:true, maintainAspectRatio:false,
       interaction:{mode:'index',intersect:false},
+      _csIdx: annotIdx,
       plugins:{
         legend:{display:true,position:'top',labels:{font:{size:10},boxWidth:10,padding:6}},
-        tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.raw!=null?c.raw+'':' —'}`}},
+        tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.raw!=null?Math.round(c.raw):'—'}`}},
         annotation:{annotations:{
           baseline:{type:'line',yMin:100,yMax:100,borderColor:'rgba(255,255,255,.25)',
                     borderWidth:1,borderDash:[4,3],
@@ -3479,21 +3809,27 @@ def netlify_deploy(output_path="supertails_dashboard.html"):
 
 def main():
     p = argparse.ArgumentParser(description="Supertails Offline Campaign Dashboard v3")
-    p.add_argument("--demo",         action="store_true", help="365-day sample data, no API keys")
-    p.add_argument("--watch",        action="store_true", help="Keep running, refresh on interval")
-    p.add_argument("--interval",     type=int, default=60, help="Watch refresh interval in minutes (default 60)")
-    p.add_argument("--full-refresh", action="store_true", help="Re-fetch entire 12-month history")
-    p.add_argument("--config",       default="config.json")
-    p.add_argument("--output",       default="supertails_dashboard.html")
+    p.add_argument("--demo",             action="store_true", help="365-day sample data, no API keys")
+    p.add_argument("--watch",            action="store_true", help="Keep running, refresh on interval")
+    p.add_argument("--interval",         type=int, default=60, help="Watch refresh interval in minutes (default 60)")
+    p.add_argument("--full-refresh",     action="store_true", help="Re-fetch entire 12-month history")
+    p.add_argument("--test-meltwater",   action="store_true", help="Diagnose Meltwater API connection and print raw response")
+    p.add_argument("--config",           default="config.json")
+    p.add_argument("--output",           default="supertails_dashboard.html")
     args = p.parse_args()
 
     print(f"\n{'='*56}")
     print(f"  Supertails · Four-Signal Dashboard  v3")
     print(f"{'='*56}")
-    print(f"  Mode   : {'DEMO' if args.demo else ('WATCH' if args.watch else 'LIVE')}")
-    print(f"  Output : {args.output}\n")
+    if not args.test_meltwater:
+        print(f"  Mode   : {'DEMO' if args.demo else ('WATCH' if args.watch else 'LIVE')}")
+        print(f"  Output : {args.output}\n")
 
     config = load_config(args.config)
+
+    if args.test_meltwater:
+        test_meltwater(config)
+        return
 
     if args.demo:
         print("🎭  Generating 365-day demo data store...\n")
