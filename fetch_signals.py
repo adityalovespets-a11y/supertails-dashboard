@@ -1456,11 +1456,6 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
   <span class="city-note" id="cityNote"></span>
 </div>
 
-<!-- NEGATIVE ALERT -->
-<div class="alert-bar hidden" id="negAlert">
-  ⚠️ NEGATIVE SENTIMENT ALERT — Rate above 15% threshold. Escalate to Brand & CX immediately.
-</div>
-
 <!-- SIGNAL CARDS -->
 <div class="section"><div class="sec-title">Signal Health — Selected Period vs Baseline</div></div>
 <div class="cards">
@@ -1692,10 +1687,6 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
     <div class="ctitle">Sentiment Split</div>
     <div class="csub" style="margin-bottom:12px;">Meltwater automated classification · latest period</div>
     <div id="sentBars"></div>
-    <div style="margin-top:10px;">
-      <div style="font-size:11px;color:var(--muted);">Negative rate · Alert threshold: 15%</div>
-      <div class="neg-rate-val" id="negRateVal">—</div>
-    </div>
   </div>
 </div>
 
@@ -1704,33 +1695,225 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
 <!-- ═══════════════════════ TAB 2 — INTELLIGENCE & SIGNALS ═══════════════════════ -->
 <div id="tabContent-intelligence" style="display:none;">
 
-<!-- HOW TO USE THIS DASHBOARD -->
+<!-- SIGNAL DICTIONARY -->
 <div class="guide-card" style="margin-top:16px;">
-  <div class="guide-title">📖 How to Use This Dashboard</div>
+  <div class="guide-title">📡 Signal Dictionary — What Each Number Means for the Brand</div>
+
+  <!-- Signal timing flow -->
+  <div style="display:flex;align-items:center;justify-content:center;gap:0;margin-bottom:16px;flex-wrap:wrap;">
+    <div style="text-align:center;padding:8px 14px;background:#EFF6FF;border-radius:8px;border:1px solid #BFDBFE;">
+      <div style="font-size:9px;font-weight:700;color:#1E40AF;letter-spacing:.5px;">LEADING (+2d)</div>
+      <div style="font-size:11px;font-weight:700;color:#1E40AF;margin-top:2px;">🔍 Branded Search</div>
+      <div style="font-size:9px;color:#3B82F6;margin-top:1px;">Brand Mentions</div>
+    </div>
+    <div style="font-size:16px;color:var(--muted);padding:0 6px;">→</div>
+    <div style="text-align:center;padding:8px 14px;background:#F0FDF4;border-radius:8px;border:1px solid #BBF7D0;">
+      <div style="font-size:9px;font-weight:700;color:#15803D;letter-spacing:.5px;">COINCIDENT</div>
+      <div style="font-size:11px;font-weight:700;color:#15803D;margin-top:2px;">🌐 Non-Paid Sessions</div>
+      <div style="font-size:9px;color:#22C55E;margin-top:1px;">Brand Paid Sessions</div>
+    </div>
+    <div style="font-size:16px;color:var(--muted);padding:0 6px;">→</div>
+    <div style="text-align:center;padding:8px 14px;background:#FFF7ED;border-radius:8px;border:1px solid #FED7AA;">
+      <div style="font-size:9px;font-weight:700;color:#C2410C;letter-spacing:.5px;">LAGGING (2–7d)</div>
+      <div style="font-size:11px;font-weight:700;color:#C2410C;margin-top:2px;">📱 Organic Installs</div>
+      <div style="font-size:9px;color:#F97316;margin-top:1px;">India NMV</div>
+    </div>
+  </div>
+
+  <!-- Signal rows -->
+  <div style="display:flex;flex-direction:column;gap:8px;">
+
+    <!-- Branded Search -->
+    <div style="display:grid;grid-template-columns:180px 1fr 1fr 100px;gap:10px;align-items:start;padding:10px 12px;background:#F8F9FA;border-radius:8px;border-left:3px solid #3B82F6;">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:var(--text);">🔍 Branded Search</div>
+        <div style="font-size:9px;color:var(--muted);margin-top:2px;">Source: Google Search Console</div>
+        <div style="font-size:9px;color:#3B82F6;margin-top:2px;font-weight:600;">LEADING · +2 days</div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:600;color:var(--text);margin-bottom:3px;">What it measures</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.5;">Weekly impressions for brand search queries (supertails, super tails, etc.) on Google India. This is the earliest signal that offline advertising is creating digital brand recall — people who see a billboard or auto will Google the brand before downloading the app.</div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:600;color:var(--text);margin-bottom:3px;">How to read it (brand POV)</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.5;">+15–20% above baseline = strong offline recall translating to digital intent. If search is up but installs lag, check App Store listing. Sustained lift for 2+ weeks = campaign is building durable brand awareness, not just burst. GSC has a 3-day processing lag.</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:9px;font-weight:700;color:var(--muted);margin-bottom:4px;">THRESHOLDS</div>
+        <div style="font-size:9px;padding:2px 6px;background:#DCFCE7;color:#15803D;border-radius:4px;margin-bottom:2px;">🟢 &gt;+15%</div>
+        <div style="font-size:9px;padding:2px 6px;background:#FEF3C7;color:#92400E;border-radius:4px;margin-bottom:2px;">🟡 0–15%</div>
+        <div style="font-size:9px;padding:2px 6px;background:#FEE2E2;color:#991B1B;border-radius:4px;">🔴 Below baseline</div>
+      </div>
+    </div>
+
+    <!-- Organic Installs -->
+    <div style="display:grid;grid-template-columns:180px 1fr 1fr 100px;gap:10px;align-items:start;padding:10px 12px;background:#F8F9FA;border-radius:8px;border-left:3px solid #F97316;">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:var(--text);">📱 Organic Installs</div>
+        <div style="font-size:9px;color:var(--muted);margin-top:2px;">Source: AppsFlyer (CSV)</div>
+        <div style="font-size:9px;color:#F97316;margin-top:2px;font-weight:600;">LAGGING · +2 days</div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:600;color:var(--text);margin-bottom:3px;">What it measures</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.5;">App installs attributed to organic sources (no paid media) across Android and iOS, All-India. Organic installs are the clearest evidence that brand awareness is converting into product adoption — someone chose to install without being retargeted.</div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:600;color:var(--text);margin-bottom:3px;">How to read it (brand POV)</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.5;">Lags branded search by ~2 days (r=0.55 in historical data). A +10% lift 2–3 days after a search spike confirms the funnel is converting. Flat installs despite high search = friction in App Store listing or onboarding. This is the single best proof point for campaign ROI.</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:9px;font-weight:700;color:var(--muted);margin-bottom:4px;">THRESHOLDS</div>
+        <div style="font-size:9px;padding:2px 6px;background:#DCFCE7;color:#15803D;border-radius:4px;margin-bottom:2px;">🟢 &gt;+10%</div>
+        <div style="font-size:9px;padding:2px 6px;background:#FEF3C7;color:#92400E;border-radius:4px;margin-bottom:2px;">🟡 0–10%</div>
+        <div style="font-size:9px;padding:2px 6px;background:#FEE2E2;color:#991B1B;border-radius:4px;">🔴 Below baseline</div>
+      </div>
+    </div>
+
+    <!-- Non-Paid Sessions -->
+    <div style="display:grid;grid-template-columns:180px 1fr 1fr 100px;gap:10px;align-items:start;padding:10px 12px;background:#F8F9FA;border-radius:8px;border-left:3px solid #22C55E;">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:var(--text);">🌐 Non-Paid Sessions</div>
+        <div style="font-size:9px;color:var(--muted);margin-top:2px;">Source: GA4 (All-India)</div>
+        <div style="font-size:9px;color:#22C55E;margin-top:2px;font-weight:600;">COINCIDENT</div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:600;color:var(--text);margin-bottom:3px;">What it measures</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.5;">All website sessions NOT from paid channels (Organic Search, Direct, Referral, Organic Social, Email). This shows how many people are coming to Supertails.com without being pushed by ad spend — a clean read of genuine brand pull.</div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:600;color:var(--text);margin-bottom:3px;">How to read it (brand POV)</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.5;">A spike here without a corresponding increase in paid spend = real organic brand interest. If non-paid sessions rise while paid sessions are flat or down, the brand is becoming self-sustaining. Watch for a 5–7 day sustained lift to separate campaign noise from real pull.</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:9px;font-weight:700;color:var(--muted);margin-bottom:4px;">THRESHOLDS</div>
+        <div style="font-size:9px;padding:2px 6px;background:#DCFCE7;color:#15803D;border-radius:4px;margin-bottom:2px;">🟢 &gt;+10%</div>
+        <div style="font-size:9px;padding:2px 6px;background:#FEF3C7;color:#92400E;border-radius:4px;margin-bottom:2px;">🟡 0–10%</div>
+        <div style="font-size:9px;padding:2px 6px;background:#FEE2E2;color:#991B1B;border-radius:4px;">🔴 Below baseline</div>
+      </div>
+    </div>
+
+    <!-- Brand Paid Sessions -->
+    <div style="display:grid;grid-template-columns:180px 1fr 1fr 100px;gap:10px;align-items:start;padding:10px 12px;background:#F8F9FA;border-radius:8px;border-left:3px solid #8B5CF6;">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:var(--text);">💳 Brand Paid Sessions</div>
+        <div style="font-size:9px;color:var(--muted);margin-top:2px;">Source: GA4 (Brand campaigns)</div>
+        <div style="font-size:9px;color:#8B5CF6;margin-top:2px;font-weight:600;">COINCIDENT</div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:600;color:var(--text);margin-bottom:3px;">What it measures</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.5;">Sessions from Google Ads campaigns tagged with "Brand" in the campaign name — these are paid brand defence campaigns capturing high-intent searchers who already know Supertails. This number is partially controlled by your spend, not just organic brand strength.</div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:600;color:var(--text);margin-bottom:3px;">How to read it (brand POV)</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.5;">If brand paid sessions rise in line with branded search, you're successfully capturing the intent you're generating. If branded search rises but brand paid sessions don't — either budget is capped or competitor bidding is stealing share. Compare with GSC impression share for full picture.</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:9px;font-weight:700;color:var(--muted);margin-bottom:4px;">THRESHOLDS</div>
+        <div style="font-size:9px;padding:2px 6px;background:#DCFCE7;color:#15803D;border-radius:4px;margin-bottom:2px;">🟢 &gt;+15%</div>
+        <div style="font-size:9px;padding:2px 6px;background:#FEF3C7;color:#92400E;border-radius:4px;margin-bottom:2px;">🟡 0–15%</div>
+        <div style="font-size:9px;padding:2px 6px;background:#FEE2E2;color:#991B1B;border-radius:4px;">🔴 Below baseline</div>
+      </div>
+    </div>
+
+    <!-- Brand Mentions -->
+    <div style="display:grid;grid-template-columns:180px 1fr 1fr 100px;gap:10px;align-items:start;padding:10px 12px;background:#F8F9FA;border-radius:8px;border-left:3px solid #22C55E;">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:var(--text);">💬 Brand Mentions</div>
+        <div style="font-size:9px;color:var(--muted);margin-top:2px;">Source: Meltwater (Social)</div>
+        <div style="font-size:9px;color:#22C55E;margin-top:2px;font-weight:600;">COINCIDENT</div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:600;color:var(--text);margin-bottom:3px;">What it measures</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.5;">Daily mentions of Supertails across Instagram, X (Twitter), Reddit, LinkedIn — including brand name, hashtags (#Supertails, #DanishSait), and campaign-related queries. Covers earned and owned social, not paid. Negative sub-line shows the % that are negative in sentiment.</div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:600;color:var(--text);margin-bottom:3px;">How to read it (brand POV)</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.5;">A spike in mentions post-OOH launch = the campaign is generating social conversation. Watch for a negative rate above 8% (caution) or 15% (escalate). Brand mentions often move with campaign launches and influencer content. Compare with HUFT mentions to track relative SOV in the pet care category.</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:9px;font-weight:700;color:var(--muted);margin-bottom:4px;">NEG. RATE</div>
+        <div style="font-size:9px;padding:2px 6px;background:#DCFCE7;color:#15803D;border-radius:4px;margin-bottom:2px;">🟢 &lt;8%</div>
+        <div style="font-size:9px;padding:2px 6px;background:#FEF3C7;color:#92400E;border-radius:4px;margin-bottom:2px;">🟡 8–15%</div>
+        <div style="font-size:9px;padding:2px 6px;background:#FEE2E2;color:#991B1B;border-radius:4px;">🔴 &gt;15%</div>
+      </div>
+    </div>
+
+    <!-- Spend -->
+    <div style="display:grid;grid-template-columns:180px 1fr 1fr 100px;gap:10px;align-items:start;padding:10px 12px;background:#F8F9FA;border-radius:8px;border-left:3px solid #E8450A;">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:var(--text);">₹ Brand &amp; Perf Spend</div>
+        <div style="font-size:9px;color:var(--muted);margin-top:2px;">Source: Google Sheet (Daily)</div>
+        <div style="font-size:9px;color:#E8450A;margin-top:2px;font-weight:600;">INPUT SIGNAL</div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:600;color:var(--text);margin-bottom:3px;">What it measures</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.5;">Daily ₹ split between Brand campaigns (those tagged "BrandMar" — designed to defend and grow branded search share) and Performance campaigns (conversion-focused, retargeting, category). The mix tells you how much of the budget is building the brand vs extracting from existing demand.</div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:600;color:var(--text);margin-bottom:3px;">How to read it (brand POV)</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.5;">Binet &amp; Field benchmark: 40–60% brand investment for sustained growth. With OOH live in Bangalore, increasing brand digital spend amplifies the offline signal by capturing the awareness you're generating. A perf-heavy mix (below 20% brand) means you're mining past equity, not building new equity.</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:9px;font-weight:700;color:var(--muted);margin-bottom:4px;">BRAND MIX</div>
+        <div style="font-size:9px;padding:2px 6px;background:#DCFCE7;color:#15803D;border-radius:4px;margin-bottom:2px;">🟢 &gt;35%</div>
+        <div style="font-size:9px;padding:2px 6px;background:#FEF3C7;color:#92400E;border-radius:4px;margin-bottom:2px;">🟡 20–35%</div>
+        <div style="font-size:9px;padding:2px 6px;background:#FEE2E2;color:#991B1B;border-radius:4px;">🔴 &lt;20%</div>
+      </div>
+    </div>
+
+    <!-- NMV -->
+    <div style="display:grid;grid-template-columns:180px 1fr 1fr 100px;gap:10px;align-items:start;padding:10px 12px;background:#F8F9FA;border-radius:8px;border-left:3px solid #14B8A6;">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:var(--text);">📦 India NMV</div>
+        <div style="font-size:9px;color:var(--muted);margin-top:2px;">Source: Supertails data MCP</div>
+        <div style="font-size:9px;color:#14B8A6;margin-top:2px;font-weight:600;">LAGGING · 3–7 days</div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:600;color:var(--text);margin-bottom:3px;">What it measures</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.5;">Net Merchandise Value — total revenue net of returns, across All-India orders on the Supertails platform. This is the ultimate downstream outcome of the brand campaign. Because purchase decisions take days to weeks from first brand exposure, NMV is the last signal to move.</div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:600;color:var(--text);margin-bottom:3px;">How to read it (brand POV)</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.5;">A sustained +10% vs baseline, occurring 3–7 days after a branded search spike, is the strongest possible proof of campaign effectiveness. The Bangalore offline lift = NMV from Bangalore orders above the All-India trend. Don't judge NMV in week 1 — wait for the signal lag to resolve.</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:9px;font-weight:700;color:var(--muted);margin-bottom:4px;">THRESHOLDS</div>
+        <div style="font-size:9px;padding:2px 6px;background:#DCFCE7;color:#15803D;border-radius:4px;margin-bottom:2px;">🟢 &gt;+10%</div>
+        <div style="font-size:9px;padding:2px 6px;background:#FEF3C7;color:#92400E;border-radius:4px;margin-bottom:2px;">🟡 0–10%</div>
+        <div style="font-size:9px;padding:2px 6px;background:#FEE2E2;color:#991B1B;border-radius:4px;">🔴 Below baseline</div>
+      </div>
+    </div>
+
+  </div><!-- /signal rows -->
+</div>
+
+<!-- HOW TO NAVIGATE -->
+<div class="guide-card" style="margin-top:10px;">
+  <div class="guide-title">📖 How to Navigate</div>
   <div class="guide-grid">
     <div class="guide-item">
       <div class="guide-item-title">📊 Dashboard Tab</div>
-      <div class="guide-item-body">Your primary daily view. Signal cards show the 4 key brand-lift indicators vs pre-campaign baseline. Use the date range and granularity controls to zoom in. Toggle signals on the correlation overlay to see what's moving together. Download the weekly CSV for offline analysis.</div>
+      <div class="guide-item-body">Your primary daily view. Signal cards show key brand-lift indicators vs pre-campaign baseline. Use the date range and granularity controls to zoom in or out. Toggle signals on the correlation overlay to see what's moving together.</div>
     </div>
     <div class="guide-item">
-      <div class="guide-item-title">🎯 Intelligence Tab (this page)</div>
-      <div class="guide-item-body">Automated narrative, alerts, and action cards generated fresh on each data pull. The freshness bar shows how current each signal is. "Ask Your Data" lets you query the underlying numbers in plain English. Use this tab to decide what to act on each week.</div>
+      <div class="guide-item-title">🎯 Intelligence Tab (here)</div>
+      <div class="guide-item-body">Automated narrative, alerts, and action cards generated fresh on each data pull. "Ask Your Data" lets you query any signal in plain English — click a chip or type your own question. Use this tab to decide what to act on each week.</div>
     </div>
     <div class="guide-item">
-      <div class="guide-item-title">📐 Four-Signal Framework</div>
-      <div class="guide-item-body"><b>Signal 1:</b> GSC Branded Search — intent indicator, leads installs by ~2 days.<br><b>Signal 2:</b> Organic Installs — lagging brand lift signal.<br><b>Signal 3:</b> Non-Paid Sessions — web interest without ad spend.<br><b>Signal 4:</b> Brand Mentions — social reach &amp; sentiment (Meltwater).</div>
-    </div>
-    <div class="guide-item">
-      <div class="guide-item-title">📏 Reading the Baseline</div>
-      <div class="guide-item-body">Baseline = Jan 5 – Mar 22 2026 (W01–W11), WTF Sale excluded. The signal cards show % above/below this baseline. Green = above threshold. Yellow = marginal. Red = below baseline. A sustained +15–20% on branded search is the first campaign lift indicator.</div>
+      <div class="guide-item-title">📏 Baseline &amp; Thresholds</div>
+      <div class="guide-item-body">Baseline = Jan 5 – Mar 22 2026 (W01–W11), WTF Sale excluded. Signal cards show % above/below baseline. Green = above threshold. Yellow = watch. Red = action needed. Don't panic at single-day dips — look at 7-day rolling trends.</div>
     </div>
     <div class="guide-item">
       <div class="guide-item-title">🏙️ Bangalore Delta</div>
-      <div class="guide-item-body">Digital signals are All-India. The Bangalore offline lift = Bangalore revenue above the India trend. Use the city filter on the Dashboard tab to view Bangalore-specific sessions. Compare Bangalore vs All-India spend efficiency using the spend cards.</div>
+      <div class="guide-item-body">Digital signals are All-India. Bangalore offline lift = Bangalore NMV above the India-wide trend. Use the city filter on the Dashboard tab to view Bangalore-specific session data and isolate the offline campaign effect.</div>
     </div>
     <div class="guide-item">
       <div class="guide-item-title">🔄 Data Refresh</div>
-      <div class="guide-item-body">Run <code style="background:#f3f4f6;padding:1px 5px;border-radius:3px;font-size:10px;">python3 fetch_signals.py</code> daily to pull t-1 data. The dashboard auto-refreshes every 5 min if open. GSC has a 3-day processing lag. AppsFlyer data is loaded via CSV export. Spend updates every run from the linked Google Sheet.</div>
+      <div class="guide-item-body">Run <code style="background:#f3f4f6;padding:1px 5px;border-radius:3px;font-size:10px;">python3 fetch_signals.py</code> daily (t-1 data). GSC has a 3-day processing lag. AppsFlyer loaded via CSV export. Spend auto-updates from Google Sheet each run.</div>
+    </div>
+    <div class="guide-item">
+      <div class="guide-item-title">📊 Correlation Table</div>
+      <div class="guide-item-body">Shows weekly values for all signals side-by-side. The r=0.92 figure means 92% of weekly Bangalore NMV variance is explained by the composite signal index — a very strong predictive relationship. Use it to spot weeks where signals diverge from revenue unexpectedly.</div>
     </div>
   </div>
 </div>
@@ -1768,7 +1951,7 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
       <div id="chatSuggestions" style="padding:8px 14px;display:flex;flex-wrap:wrap;gap:5px;border-bottom:1px solid var(--border);"></div>
       <div id="chatMessages" style="flex:1;overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:8px;max-height:260px;"></div>
       <div style="padding:8px 14px;border-top:1px solid var(--border);display:flex;gap:6px;">
-        <input id="chatInput" type="text" placeholder="Ask about the data…"
+        <input id="chatInput" type="text" placeholder="e.g. Is the campaign working? · How is brand sentiment? · Which signal first?"
           style="flex:1;border:1px solid var(--border);border-radius:6px;padding:6px 9px;font-size:11px;outline:none;"
           onkeydown="if(event.key==='Enter')sendChatMsg()">
         <button onclick="sendChatMsg()" style="background:var(--orange);color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;">Ask</button>
@@ -1779,9 +1962,12 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
 
 <!-- WEEKLY CORRELATION REPORT TABLE -->
 <div class="section" style="margin-top:4px;padding-bottom:16px;">
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-wrap:wrap;gap:6px;">
     <div class="sec-title" style="margin-bottom:0;">Weekly Correlation Report</div>
     <button class="corr-dl-btn" onclick="downloadCorrCSV()" style="background:var(--orange);border-color:var(--orange);color:#fff;">↓ Download CSV</button>
+  </div>
+  <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.6;">
+    Side-by-side weekly values for all signals. <b>How to read:</b> when Branded Search rises in week N, expect Organic Installs to follow in week N+1 and NMV to follow in week N+1 to N+2 (due to signal lags). A week where signals diverge from revenue is worth investigating. The composite r=0.92 means 92% of NMV variance is explained by the four-signal index.
   </div>
   <div style="background:#fff;border-radius:var(--r);border:1px solid var(--border);overflow:auto;">
     <div id="corrReportTable" style="padding:0;min-width:700px;"></div>
@@ -2097,9 +2283,27 @@ function getCitySessionArr(key){
     setTimeout(()=>addMsg(a, false), 200);
   }
 
-  // Render suggestion chips
+  // Chip groups — first 6 shown by default, toggle to show all
+  const chipGroups = [
+    { label: '📊 Campaign', indices: [0, 1] },
+    { label: '📡 Signals',  indices: [2, 3, 4, 5] },
+    { label: '₹ Spend',     indices: [6, 7] },
+    { label: '📈 Revenue',  indices: [8, 9] },
+    { label: '⏱ Timing',   indices: [10, 11] },
+  ];
+
   if(chatSug){
-    chatSug.innerHTML = qa.map((item,i)=>`<button onclick="chatSugClick(${i})" style="background:#F0F2F5;border:1px solid var(--border);border-radius:14px;padding:4px 10px;font-size:10px;cursor:pointer;color:var(--text);">${item.q}</button>`).join('');
+    let html = '';
+    chipGroups.forEach(grp=>{
+      html += `<div style="width:100%;display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:2px;">
+        <span style="font-size:9px;font-weight:700;color:var(--muted);white-space:nowrap;min-width:60px;">${grp.label}</span>`;
+      grp.indices.forEach(i=>{
+        if(!qa[i]) return;
+        html += `<button onclick="chatSugClick(${i})" style="background:#F0F2F5;border:1px solid var(--border);border-radius:14px;padding:3px 9px;font-size:10px;cursor:pointer;color:var(--text);white-space:nowrap;">${qa[i].q}</button>`;
+      });
+      html += '</div>';
+    });
+    chatSug.innerHTML = html;
   }
 
   window.chatSugClick = function(i){
@@ -2108,7 +2312,49 @@ function getCitySessionArr(key){
   };
 
   // Initial greeting
-  addMsg("Hi Aditya! I have loaded the signal analysis for "+A.common_date+". Click a question above or type your own below.", false);
+  addMsg("Hi Aditya! Signal analysis loaded to "+A.common_date+". Click any question above — or type your own.", false);
+
+  // Keyword matching — score each Q by keyword overlap, pick best match
+  function findBestMatch(input){
+    const ql = input.toLowerCase().replace(/[^a-z0-9\s]/g,'');
+    // Keyword aliases for common brand terms
+    const aliases = {
+      'campaign':'bangalore working campaign',
+      'working':'bangalore campaign working',
+      'brand awareness':'branded search brand strength',
+      'awareness':'branded search brand strength',
+      'mentions':'brand mentions trending',
+      'social':'brand mentions trending meltwater',
+      'sentiment':'brand mentions trending negative',
+      'installs':'installs lagging install recover',
+      'organic installs':'installs lagging recover',
+      'sessions':'non-paid sessions tell',
+      'non paid':'non-paid sessions',
+      'revenue':'revenue trend nmv',
+      'nmv':'revenue trend nmv',
+      'spend':'spend mix efficient',
+      'budget':'spend mix brand efficient',
+      'priority':'prioritise week',
+      'prioritize':'prioritise week',
+      'correlation':'correlation numbers read',
+      'r value':'correlation numbers read',
+      'when':'installs recover timing',
+      'morning':'signal check morning',
+      'first':'signal check morning',
+      'today':'signal check morning prioritise',
+    };
+    // Expand query with aliases
+    let expanded = ql;
+    Object.entries(aliases).forEach(([k,v])=>{ if(ql.includes(k)) expanded += ' '+v; });
+
+    let bestScore = 0, bestMatch = null;
+    qa.forEach(item=>{
+      const qwords = item.q.toLowerCase().replace(/[^a-z0-9\s]/g,'').split(/\s+/).filter(w=>w.length>3);
+      const score = qwords.filter(w=>expanded.includes(w)).length;
+      if(score > bestScore){ bestScore=score; bestMatch=item; }
+    });
+    return bestScore >= 2 ? bestMatch : null;
+  }
 
   // Text input handler
   window.sendChatMsg = function(){
@@ -2118,27 +2364,24 @@ function getCitySessionArr(key){
     inp.value = '';
     addMsg(q, true);
 
-    // Simple keyword matching
-    const ql = q.toLowerCase();
-    const match = qa.find(item => {
-      const kw = item.q.toLowerCase().split(/\s+/).filter(w=>w.length>4);
-      return kw.filter(w=>ql.includes(w)).length >= 2;
-    });
-
+    const match = findBestMatch(q);
     if(match){
       setTimeout(()=>addMsg(match.a, false), 300);
     } else {
-      // Fallback: copy-to-Claude suggestion
-      const ctx = A.chat_context||'';
+      // Friendly fallback — show what topics are available
       setTimeout(()=>{
-        addMsg("I don\u2019t have a pre-loaded answer for that exact question. Here\u2019s the data context you can paste into Claude for a deeper answer:", false);
+        addMsg("I don\u2019t have a specific answer for that. Here are the topics I can answer \u2014 click any:", false);
         setTimeout(()=>{
-          const copyEl = document.createElement('div');
-          copyEl.style.cssText = 'align-self:flex-start;background:#F0F2F5;border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:10px;max-width:95%;font-family:monospace;color:#475569;white-space:pre-wrap;cursor:pointer;';
-          copyEl.textContent = ctx;
-          copyEl.title = 'Click to copy';
-          copyEl.onclick = ()=>{navigator.clipboard.writeText(ctx).then(()=>{copyEl.style.background='#DCFCE7';setTimeout(()=>copyEl.style.background='#F0F2F5',1000);});};
-          if(chatMsg){ chatMsg.appendChild(copyEl); chatMsg.scrollTop=chatMsg.scrollHeight; }
+          const wrap = document.createElement('div');
+          wrap.style.cssText = 'align-self:flex-start;display:flex;flex-wrap:wrap;gap:5px;max-width:95%;margin-top:2px;';
+          qa.forEach((item,i)=>{
+            const btn = document.createElement('button');
+            btn.textContent = item.q;
+            btn.style.cssText = 'background:#F0F2F5;border:1px solid var(--border);border-radius:14px;padding:3px 9px;font-size:10px;cursor:pointer;color:var(--text);';
+            btn.onclick = ()=>{ addMsg(item.q,true); setTimeout(()=>addMsg(item.a,false),200); };
+            wrap.appendChild(btn);
+          });
+          if(chatMsg){ chatMsg.appendChild(wrap); chatMsg.scrollTop=chatMsg.scrollHeight; }
         }, 100);
       }, 300);
     }
@@ -2578,10 +2821,6 @@ function renderDashboard(slice,g){
   // SOV donut (latest data point in slice)
   renderSOV(slice);
 
-  // Negative alert — fire if rate ≥ 15%
-  const lastNeg=slice.negative_rate.filter(x=>x!=null).slice(-1)[0];
-  document.getElementById('negAlert').classList.toggle('hidden',!(lastNeg>=15));
-  document.getElementById('negRateVal').textContent=lastNeg!=null?fmtD(lastNeg)+'%':'—';
 }
 
 // ── All Sessions combo chart ──────────────────────────────────────────────────
@@ -3517,59 +3756,139 @@ def generate_analysis(store, config):
     )
 
     # ── Pre-generated Q&A ─────────────────────────────────────────────────────
+    _gap = round((bs_vs_bl or 0) - (di_vs_bl or 0))
     chat_qa = [
-        {
-            "q": "Why are installs below baseline despite branded search being up?",
-            "a": (
-                f"Branded search is {fmt_pct(bs_vs_bl)} vs baseline, showing the campaign is successfully building brand awareness and intent. "
-                f"However organic installs are {fmt_pct(di_vs_bl)} vs baseline — a gap of {(bs_vs_bl or 0) - (di_vs_bl or 0):.0f} percentage points. "
-                "This is a classic intent-to-conversion gap. Three likely causes: (1) 2–3 day natural lag between search intent and app install — installs typically follow branded search by 48–72 hours; "
-                "(2) App store listing friction — if someone searches 'supertails' and lands on the Play Store listing, CTR and conversion rate may be the bottleneck; "
-                "(3) Attribution window — some installs triggered by the campaign may be classified as 'paid' rather than 'organic' depending on media source tags."
-            )
-        },
+        # ── Campaign performance ──────────────────────────────────────────────
         {
             "q": "Is the Bangalore campaign working?",
             "a": (
-                f"The digital signals look encouraging. Branded search is {fmt_pct(bs_vs_bl)} above baseline — the best pre-proxy for offline brand awareness. "
-                f"Revenue is {fmt_pct(rv_vs_bl)} above baseline on a weekly basis. "
-                "However we don't yet have city-level AppsFlyer data to isolate Bangalore specifically — the current signals are all-India. "
-                "The true Bangalore lift will only be measurable once you re-export AppsFlyer CSVs with the City dimension enabled, or once Google Ads city-level conversion data is available."
+                f"Early signals look {'encouraging' if (bs_vs_bl or 0) > 5 else 'mixed'}. "
+                f"Branded search is {fmt_pct(bs_vs_bl)} above baseline — this is your earliest digital proof that offline advertising (OOH, autos, clinics) is generating brand recall. "
+                f"Revenue is {fmt_pct(rv_vs_bl)} vs baseline. "
+                "Remember: the digital signals are All-India. The true Bangalore-specific lift will be clearest once you compare Bangalore NMV against the national trend — "
+                "look for Bangalore revenue growing faster than the India average starting 5–7 days post-launch. The campaign went live April 15; expect the strongest signal window Apr 17–25."
             )
         },
         {
             "q": "What should I prioritise this week?",
             "a": (
-                f"Top 3 this week: "
-                f"(1) {actions[0]['title'] if actions else 'Maintain campaign'} — {actions[0]['why'] if actions else ''}. "
-                f"(2) {actions[1]['title'] if len(actions)>1 else 'Monitor spend mix'} — {actions[1]['why'] if len(actions)>1 else ''}. "
-                f"(3) Re-export AppsFlyer installs with City dimension to populate Bangalore-specific install data, which will unlock the four-signal framework fully."
+                f"Top priorities this week: "
+                f"(1) {actions[0]['title'] if actions else 'Monitor campaign signals daily'} — {actions[0]['why'] if actions else 'watch for lift vs baseline'}. "
+                f"(2) {actions[1]['title'] if len(actions)>1 else 'Check spend mix'} — {actions[1]['why'] if len(actions)>1 else 'ensure brand is adequately funded'}. "
+                f"(3) Re-export AppsFlyer CSVs with the City dimension enabled — this unlocks Bangalore-specific install data, which is the missing link in the four-signal framework."
             )
         },
+        # ── Signal explanations ───────────────────────────────────────────────
+        {
+            "q": "What does branded search tell us about brand strength?",
+            "a": (
+                f"Branded search impressions (from Google Search Console) are the first signal to move when offline advertising works. "
+                f"Currently {fmt_pct(bs_vs_bl)} vs the Jan–Mar 2026 baseline of {BS_WK:,} impressions/week. "
+                "When someone sees a Supertails billboard or auto wrap and doesn't immediately download the app, they often Google the brand later — that's what this captures. "
+                "A sustained +15% for 2+ weeks means the campaign is building durable brand memory, not just a burst. "
+                f"The historical lag to installs is ~2 days, so branded search today predicts installs by {common_date[:7]}-end."
+            )
+        },
+        {
+            "q": "Why are installs lagging behind branded search?",
+            "a": (
+                f"Branded search is {fmt_pct(bs_vs_bl)} vs baseline while organic installs are {fmt_pct(di_vs_bl)} — "
+                f"a gap of {abs(_gap)} percentage points. "
+                + ("This gap is within the normal 2-day lag window — installs should catch up shortly. " if _gap < 15 else
+                   "This gap is wider than the usual 2-day lag. Three possible causes: "
+                   "(1) App store listing friction — someone searches 'supertails' and lands on the Play Store page but doesn't install; check the listing conversion rate. "
+                   "(2) Attribution — some installs may be tagged as 'paid' rather than 'organic' due to media source tags. "
+                   "(3) Audience mismatch — OOH may be reaching a slightly older demographic that searches but is slower to install. ")
+                + "Check again in 3 days; if the gap persists above 15 points, it's worth auditing the App Store listing."
+            )
+        },
+        {
+            "q": "What does non-paid sessions tell us?",
+            "a": (
+                f"Non-paid sessions (from GA4) are currently {fmt_pct(bp_vs_bl)} vs baseline. "
+                "This captures website visits from Organic Search, Direct, Referral, and Organic Social — everything that doesn't require you to pay for the click. "
+                "A rise here without a corresponding paid spend increase is the clearest signal of genuine brand pull: people are actively seeking out Supertails rather than being pushed by ads. "
+                "Watch for sustained lift over 5–7 days. A spike that drops within 48 hours is campaign noise; one that holds is brand equity building."
+            )
+        },
+        {
+            "q": "How are brand mentions trending?",
+            "a": (
+                "Brand mentions (from Meltwater) track daily Supertails mentions across Instagram, X, Reddit, and LinkedIn — including the #DanishSait content and #SupertailsBangalore hashtag. "
+                "A spike in mentions post-April 15 means the OOH and auto campaign is generating social conversation. "
+                "The negative sub-line shows the % of mentions that are negative in sentiment. Healthy is below 8%. 8–15% is watch territory. Above 15% needs CX escalation. "
+                "Compare the mention trend to branded search — they should move together if content is amplifying the offline campaign effectively."
+            )
+        },
+        # ── Spend & efficiency ────────────────────────────────────────────────
         {
             "q": "How is the spend mix?",
             "a": (
-                f"Based on February spend data (most recent available in the sheet): brand spend is ₹{fmt_num(brand_spend_day,0)}/day ({brand_mix_pct:.0f}% of total) "
-                f"and performance spend is ₹{fmt_num(perf_spend_day,0)}/day. "
-                f"The mix is heavily performance-weighted. Industry benchmarks (Binet & Field) suggest 40–60% brand investment for sustained growth. "
-                "Given OOH is live now, there's a strong case to temporarily shift more budget to brand search to capture the demand being generated offline."
-            ) if brand_mix_pct else "Spend data is available from February 2026. Connect the Google Sheet to fetch more recent spend data."
+                f"Current spend: brand ₹{fmt_num(brand_spend_day,0)}/day ({f'{brand_mix_pct:.0f}' if brand_mix_pct is not None else 'N/A'}% of total) "
+                f"| perf ₹{fmt_num(perf_spend_day,0)}/day. "
+                "Binet & Field benchmarks suggest 40–60% brand investment for sustained growth in a category like pet care. "
+                "With OOH live in Bangalore, the brand digital budget should be amplifying the offline awareness you're generating — "
+                "capturing search intent from people who saw the billboard but didn't immediately install. "
+                + ("The current mix is heavily performance-weighted. This is mining past equity, not building new equity. "
+                   "Consider temporarily shifting 10–15% of perf budget to brand campaigns in BLR." if brand_mix_pct and brand_mix_pct < 25 else
+                   "The current mix looks reasonable for the campaign phase.")
+            ) if brand_mix_pct else "Connect the Google Sheet to see live spend data. The sheet is linked — run python3 fetch_signals.py to pull the latest."
         },
         {
-            "q": "When will installs recover?",
+            "q": "Is our brand spend efficient?",
             "a": (
-                f"Based on historical correlation in this store (r=0.55 lag), branded search leads app installs by approximately 2 days. "
-                f"Branded search has been elevated since ~April 5. If the pattern holds, install recovery should be visible around April 7–10. "
-                f"The most recent data is to {common_date} — check the dashboard again in 2–3 days for confirmation."
-            )
+                f"Brand spend efficiency = how much branded search lift you get per ₹ of brand spend. "
+                f"Currently: branded search is {fmt_pct(bs_vs_bl)} vs baseline | brand spend ₹{fmt_num(brand_spend_day,0)}/day. "
+                "True brand ROI in a campaign like this isn't purely CPC — it's the downstream NMV lift per ₹ invested in brand awareness. "
+                f"NMV is currently {fmt_pct(rv_vs_bl)} vs baseline. "
+                "With a 3–7 day revenue lag, the full efficiency picture won't be visible until week 2 of the campaign. "
+                "Track the branded search/₹ ratio weekly and compare to the pre-campaign baseline period (Jan 5–Mar 22)."
+            ) if brand_mix_pct else "Spend data is needed to calculate efficiency. Run python3 fetch_signals.py to pull the latest from the Google Sheet."
         },
+        # ── Revenue & baselines ───────────────────────────────────────────────
         {
             "q": "What is the revenue trend?",
             "a": (
                 f"India NMV for the current 4-week window is ₹{fmt_num(rv_c,0)}/week, "
-                f"which is {fmt_pct(rv_vs_bl)} vs the pre-campaign baseline of ₹{REV_WK:,.0f}/week. "
-                f"vs the prior 4 weeks, revenue is {fmt_pct(rv_pop)}. "
-                "The trend is positive. Note that April 3–5 included the WTF Sale which inflated numbers; the baseline was computed excluding that period."
+                f"{fmt_pct(rv_vs_bl)} vs the pre-campaign baseline of ₹{REV_WK:,.0f}/week. "
+                f"Week-over-week: {fmt_pct(rv_pop)}. "
+                "Revenue is the last signal to move — it lags branded search by 3–7 days and installs by 2–4 days. "
+                "Don't judge campaign effectiveness on week-1 NMV. The baseline excludes the WTF Sale (Mar 23–Apr 5) to avoid inflated comps. "
+                "A sustained +10% over 3 consecutive weeks post-April 15 would be strong proof of campaign contribution."
+            )
+        },
+        {
+            "q": "How do I read the correlation numbers?",
+            "a": (
+                "The weekly correlation report shows the Pearson r between each signal and Bangalore NMV. "
+                "r=0.92 (composite signal → NMV) means 92% of weekly NMV variance is explained by the four-signal index — a very strong relationship for a marketing signal. "
+                "r=0.55 (branded search → installs, 2-day lag) is a moderate-strong lead relationship. "
+                "How to use this: when branded search rises, installs should follow in 2 days. When installs rise, NMV should follow in 3–5 days. "
+                "If a signal rises but the downstream signal doesn't follow within the expected lag window, there's a conversion bottleneck worth investigating."
+            )
+        },
+        # ── Timing & forecasting ──────────────────────────────────────────────
+        {
+            "q": "When will installs recover?",
+            "a": (
+                f"Branded search leads organic installs by ~2 days (r=0.55 from historical data). "
+                f"The campaign went live April 15. If branded search lifted from that date, expect the first install bump by April 17–18. "
+                f"The most recent data in this dashboard is to {common_date}. "
+                "If you're seeing branded search up but installs flat beyond 4 days, check two things: "
+                "(1) App Store and Play Store listing — is the install page converting? "
+                "(2) AppsFlyer attribution — are organic installs being credited correctly or tagged as campaign-driven?"
+            )
+        },
+        {
+            "q": "Which signal should I check first each morning?",
+            "a": (
+                "Morning signal priority order: "
+                "(1) Branded Search (GSC) — first mover; up = campaign is generating brand recall. "
+                "(2) Brand Mentions (Meltwater) — real-time social pulse; check for negative spikes. "
+                "(3) Non-Paid Sessions (GA4) — confirms web interest without ad dependency. "
+                "(4) Organic Installs (AppsFlyer) — 2-day lag from search; confirms funnel is converting. "
+                "(5) India NMV — 3–7 day lag; the final proof point. "
+                "If signals 1–2 are green but 4–5 are lagging, it's expected in week 1. If all five are flat by day 7, re-examine campaign placements and creative."
             )
         },
     ]
