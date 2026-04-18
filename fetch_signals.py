@@ -150,7 +150,13 @@ def merge_into_store(store, day_data: dict):
         for d in update_dates:
             j = date_to_idx[d]
             for k, v in day_data[d].items():
-                if k in SIGNAL_KEYS and v is not None and (j >= len(new_store[k]) or new_store[k][j] is None):
+                if k not in SIGNAL_KEYS or v is None:
+                    continue
+                cur = new_store[k][j] if j < len(new_store[k]) else None
+                # Always overwrite Meltwater signals (they were often stored as 0 before the API fix)
+                _mw_keys = {"brand_mentions","hashtag_mentions","negative_mentions",
+                            "sov_percent","negative_rate","competitor_huft","competitor_wiggles","competitor_petsutra"}
+                if cur is None or (k in _mw_keys and cur == 0 and v > 0):
                     new_store[k][j] = v
         for k in DICT_KEYS:
             if k in store:
@@ -174,13 +180,19 @@ def merge_into_store(store, day_data: dict):
             if i < len(store.get(k, [])):
                 new_store[k][j] = store[k][i]
 
-    # Fill new data (new dates + back-fill nulls on existing dates)
+    # Fill new data (new dates + back-fill nulls/zeros on existing dates)
+    _mw_keys = {"brand_mentions","hashtag_mentions","negative_mentions",
+                "sov_percent","negative_rate","competitor_huft","competitor_wiggles","competitor_petsutra"}
     for d, signals in day_data.items():
         j = date_to_idx[d]
         for k in SIGNAL_KEYS:
-            if k in signals and signals[k] is not None:
-                if new_store[k][j] is None:  # don't overwrite real data
-                    new_store[k][j] = signals[k]
+            v = signals.get(k)
+            if v is None:
+                continue
+            cur = new_store[k][j]
+            # Overwrite if null, or if Meltwater key was stored as 0 (pre-API-fix placeholder)
+            if cur is None or (k in _mw_keys and cur == 0 and v > 0):
+                new_store[k][j] = v
 
     # Preserve dict-type keys (city_sessions, city_list, gsc_queries, campaign_daily)
     for k in DICT_KEYS:
@@ -1485,41 +1497,19 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
     <div class="spark-wrap"><canvas id="spark4" height="36"></canvas></div>
     <div class="stool">Meltwater · Instagram, X, Reddit, LinkedIn</div>
     <div class="sfresh" id="fr4">—</div>
+    <!-- Negative mentions sub-line -->
+    <div id="neg_sub" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+      <span style="font-size:11px;color:var(--muted);">⚠ Negative mentions</span>
+      <span style="display:flex;align-items:center;gap:6px;">
+        <span id="v_neg_mentions" style="font-size:12px;font-weight:700;">—</span>
+        <span id="d_neg_mentions" class="sdelta grey" style="font-size:10px;">—</span>
+      </span>
+    </div>
     <div id="c4_nc" style="display:none;position:absolute;inset:0;background:rgba(241,245,249,0.92);border-radius:12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;">
       <div style="font-size:18px;">🔌</div>
       <div style="font-size:12px;font-weight:600;color:#475569;">Not Connected</div>
       <div style="font-size:10px;color:#94a3b8;">Meltwater plugin required</div>
     </div>
-  </div>
-</div>
-
-<!-- MELTWATER DETAIL CARDS -->
-<div class="cards" style="margin-top:6px;grid-template-columns:repeat(3,1fr);">
-  <div class="card" id="c_neg_mentions">
-    <div class="s-bar" id="b_neg_mentions" style="background:var(--red);"></div>
-    <div class="stitle">Negative Mentions</div>
-    <div><span class="sval" id="v_neg_mentions">—</span><span class="sunit" id="su_neg_mentions">mentions/wk</span></div>
-    <div class="smeta"><span class="sbase" id="bl_neg_mentions" style="color:var(--muted);">Raw negative volume</span><span class="sdelta" id="d_neg_mentions">—</span></div>
-    <div class="spark-wrap"><canvas id="spark_neg" height="36"></canvas></div>
-    <div class="stool">Meltwater · Negative sentiment search · daily count</div>
-    <div class="sfresh" id="fr_neg_mentions">—</div>
-  </div>
-  <div class="card" id="c_neg_rate_detail">
-    <div class="s-bar" id="b_neg_rate_detail" style="background:var(--red);"></div>
-    <div class="stitle">Negative Rate</div>
-    <div><span class="sval" id="v_neg_rate_detail" style="font-size:22px;">—</span><span class="sunit">%</span></div>
-    <div class="smeta"><span class="sbase" style="color:var(--muted);">Alert threshold: 15%</span><span class="sdelta" id="d_neg_rate_detail">—</span></div>
-    <div class="stool">Negative mentions / Brand mentions · Meltwater</div>
-    <div class="sfresh" id="fr_neg_rate">—</div>
-  </div>
-  <div class="card" id="c_huft">
-    <div class="s-bar" id="b_huft" style="background:var(--navy-light);"></div>
-    <div class="stitle">HUFT Mentions</div>
-    <div><span class="sval" id="v_huft">—</span><span class="sunit" id="su_huft">mentions/wk</span></div>
-    <div class="smeta"><span class="sbase" id="bl_huft" style="color:var(--muted);">Competitor signal</span></div>
-    <div class="spark-wrap"><canvas id="spark_huft" height="36"></canvas></div>
-    <div class="stool">Meltwater · Heads Up For Tails · competitor tracking</div>
-    <div class="sfresh" id="fr_huft">—</div>
   </div>
 </div>
 
@@ -2547,20 +2537,12 @@ function renderDashboard(slice,g){
   renderSparkline('spark2',    slice.direct_installs,       '#fb923c');
   renderSparkline('spark3',    slice.total_nonpaid_sessions,'#6366f1');
   renderSparkline('spark4',    slice.brand_mentions,        '#22c55e');
-  renderSparkline('spark_neg', slice.negative_mentions,     '#dc2626');
-  renderSparkline('spark_huft',slice.competitor_huft,       '#1B2A3B');
-
-  // ── Meltwater detail cards ───────────────────────────────────────────────
-  (function(){
+  // ── Negative mentions sub-line (inside brand mentions card) ────────────
+  {
     const negMentions = granVal(slice.negative_mentions);
     const negRate     = slice.negative_rate.filter(x=>x!=null).slice(-1)[0];
-    const huftMentions= granVal(slice.competitor_huft);
-
-    // Negative mentions card
     const vnm = document.getElementById('v_neg_mentions');
     if(vnm) vnm.textContent = negMentions!=null ? fmt(negMentions) : '—';
-    const snm = document.getElementById('su_neg_mentions');
-    if(snm) snm.textContent = 'mentions/'+unitSuffix;
     const dnm = document.getElementById('d_neg_mentions');
     if(dnm){
       if(negRate!=null){
@@ -2571,48 +2553,7 @@ function renderDashboard(slice,g){
         dnm.textContent = 'No data'; dnm.className = 'sdelta grey';
       }
     }
-
-    // Negative rate detail card
-    const vnr = document.getElementById('v_neg_rate_detail');
-    if(vnr) vnr.textContent = negRate!=null ? negRate.toFixed(1) : '—';
-    const dnr = document.getElementById('d_neg_rate_detail');
-    if(dnr){
-      const cls = negRate==null?'grey':negRate>=15?'red':negRate>=8?'yellow':'green';
-      dnr.textContent = negRate==null?'No data':negRate>=15?'⚠ Above threshold':negRate>=8?'Watch':'✓ Normal';
-      dnr.className = 'sdelta '+cls;
-    }
-    const bnr = document.getElementById('b_neg_rate_detail');
-    if(bnr){
-      const cls = negRate==null?'grey':negRate>=15?'red':negRate>=8?'yellow':'green';
-      bnr.style.background = negRate>=15?'var(--red)':negRate>=8?'var(--yellow)':'var(--green)';
-    }
-
-    // HUFT card
-    const vh = document.getElementById('v_huft');
-    if(vh) vh.textContent = huftMentions!=null ? fmt(huftMentions) : '—';
-    const sh = document.getElementById('su_huft');
-    if(sh) sh.textContent = 'mentions/'+unitSuffix;
-    const bh = document.getElementById('b_huft');
-    if(bh) bh.style.background = 'var(--navy-light)';
-
-    // Freshness tags
-    function lastMWDate(arr){
-      for(let i=(arr||[]).length-1;i>=0;i--){if(arr[i]!=null&&arr[i]>0)return (S.dates||[])[i];}
-      return null;
-    }
-    function setMWFresh(id, dateStr){
-      const el=document.getElementById(id); if(!el) return;
-      if(!dateStr){el.textContent='No data';el.className='sfresh old';return;}
-      const today2=new Date(); today2.setHours(0,0,0,0);
-      const d=new Date(dateStr+'T00:00:00');
-      const days=Math.round((today2-d)/(1000*60*60*24));
-      el.textContent='Data to: '+dateStr+' ('+days+'d ago)';
-      el.className='sfresh '+(days<=2?'fresh':days<=5?'stale':'old');
-    }
-    setMWFresh('fr_neg_mentions', lastMWDate(S.negative_mentions));
-    setMWFresh('fr_neg_rate',     lastMWDate(S.negative_rate));
-    setMWFresh('fr_huft',         lastMWDate(S.competitor_huft));
-  })();
+  }
 
   // Re-render the combo charts using current toggle states
   renderAllSessions(slice, g);
@@ -3564,7 +3505,7 @@ def generate_analysis(store, config):
         f"brand paid sessions {fmt_num(bp_c,0)} ({fmt_pct(bp_vs_bl)} vs baseline) | "
         f"NMV ₹{fmt_num(rv_c,0)} ({fmt_pct(rv_vs_bl)} vs baseline).\n"
         f"Period-over-period: branded search {fmt_pct(bs_pop)} | installs {fmt_pct(di_pop)} | revenue {fmt_pct(rv_pop)}.\n"
-        f"Spend mix: brand ₹{fmt_num(brand_spend_day,0)}/day ({brand_mix_pct:.0f}% of total) | perf ₹{fmt_num(perf_spend_day,0)}/day.\n"
+        f"Spend mix: brand ₹{fmt_num(brand_spend_day,0)}/day ({f'{brand_mix_pct:.0f}' if brand_mix_pct is not None else 'N/A'}% of total) | perf ₹{fmt_num(perf_spend_day,0)}/day.\n"
         f"Key concern: {alerts[0]['signal'] + ' — ' + alerts[0]['msg'] if alerts else 'No major anomalies'}.\n"
         f"Campaign: Bangalore offline launch ~Apr 15 2026."
     )
@@ -3704,19 +3645,30 @@ def run_once(config, full_refresh, output):
     start, end = get_fetch_range(store, config, full_refresh)
     if start is None:
         print("  Already current to t-1. Regenerating dashboard from store...")
-        # Spend is a full-history pull — always re-fetch it regardless of date range
+        # Spend is a full-history pull — always re-fetch regardless of date range
         print("\n  [5/5] Spend (Google Sheet — always refreshed)")
         spend_daily = fetch_spend_daily(config)
         if spend_daily:
             store = merge_into_store(store, spend_daily)
-            # Also refresh campaign_daily
             existing_cd = store.get("campaign_daily", {})
             for d, v in spend_daily.items():
                 camps = v.get("campaigns", {})
                 if camps:
                     existing_cd[d] = camps
             store["campaign_daily"] = existing_cd
-            save_store(store)
+
+        # Meltwater — always re-fetch last 30 days to overwrite any stale zeros
+        mw_cfg = config.get("meltwater", {})
+        mw_key = mw_cfg.get("api_key", "")
+        if mw_key and not mw_key.startswith("YOUR_"):
+            mw_end   = yesterday()
+            mw_start = (date.fromisoformat(mw_end) - timedelta(days=29)).isoformat()
+            print(f"\n  [MW] Meltwater — refreshing last 30 days ({mw_start} → {mw_end})")
+            soc_daily = fetch_social_daily(config, mw_start, mw_end)
+            if soc_daily:
+                store = merge_into_store(store, soc_daily)
+
+        save_store(store)
     else:
         store = fetch_and_merge(config, store, start, end)
         save_store(store)
