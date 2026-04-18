@@ -523,7 +523,13 @@ def fetch_social_daily(config, start_date, end_date, verbose=False):
       Response: { "analysis": [ {"key": "YYYY-MM-DD...", "document_count": N}, ... ] }
 
     Standard accounts support up to 30 days per request; longer ranges are chunked.
+    Meltwater enforces a 12-month lookback cap; start_date is clamped automatically.
     """
+    # Meltwater hard limit: start must be within the last 12 months (use 364 days for safety)
+    mw_earliest = (date.today() - timedelta(days=364)).isoformat()
+    if start_date < mw_earliest:
+        start_date = mw_earliest
+
     try:
         mw = config["meltwater"]
         api_key = mw.get("api_key", "")
