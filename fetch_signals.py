@@ -3965,8 +3965,43 @@ def generate_dashboard(store, config, output_path="supertails_dashboard.html"):
 # WATCH MODE
 # ─────────────────────────────────────────────────────────────────────────────
 
+def merge_revenue_sidecar(store):
+    """
+    Picks up revenue_update.json if present (written by Claude via MCP fetch),
+    merges into store, then renames the file so it isn't re-applied next run.
+    This is how Supertails NMV data — which comes from a remote MCP the Python
+    script can't call directly — gets into the store automatically.
+    """
+    sidecar = os.path.join(os.path.dirname(os.path.abspath(__file__)), "revenue_update.json")
+    if not os.path.exists(sidecar):
+        return store
+    try:
+        payload = json.load(open(sidecar))
+        rev_data = payload.get("revenue_india", {})
+        dates = store.get("dates", [])
+        rev_arr = store.get("revenue_india", [None] * len(dates))
+        updated = 0
+        for d, v in rev_data.items():
+            if d in dates:
+                i = dates.index(d)
+                if rev_arr[i] is None or rev_arr[i] == 0:
+                    rev_arr[i] = int(v)
+                    updated += 1
+            # If date not in store yet, it will be added on next full fetch
+        store["revenue_india"] = rev_arr
+        fetched = payload.get("_fetched", "?")
+        print(f"  [Rev] Revenue sidecar applied — {updated} days updated (fetched {fetched})")
+        # Rename to .applied so it won't re-run but is preserved for audit
+        os.rename(sidecar, sidecar.replace(".json", ".applied.json"))
+    except Exception as e:
+        print(f"  [Rev] Could not apply revenue sidecar: {e}")
+    return store
+
+
 def run_once(config, full_refresh, output):
     store = load_store()
+    # Apply any pending revenue MCP update from sidecar file
+    store = merge_revenue_sidecar(store)
     start, end = get_fetch_range(store, config, full_refresh)
     if start is None:
         print("  Already current to t-1. Regenerating dashboard from store...")
