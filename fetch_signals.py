@@ -57,7 +57,7 @@ def load_config(path="config.json"):
 SIGNAL_KEYS = [
     "branded_search", "direct_installs", "total_installs", "paid_installs", "direct_installs_blr",
     # Revenue
-    "revenue_india",
+    "revenue_india", "revenue_blr", "orders_blr",
     # GA4 traffic — all channels
     "total_nonpaid_sessions", "total_paid_sessions",
     # GA4 traffic — sub-breakdowns
@@ -1657,7 +1657,35 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
 </div>
 
 <div class="section" style="margin-top:14px;">
-  <div class="sec-hdr"><div class="sec-hdr-num">8</div><div class="sec-hdr-label">Paid Breakdown — <span id="paidBreakLabel"></span></div></div>
+  <div class="sec-hdr"><div class="sec-hdr-num">8</div><div class="sec-hdr-label">Bangalore Orders &amp; Revenue — <span id="blrOrdRangeLabel"></span></div></div>
+</div>
+<div class="charts">
+  <div class="ccrd">
+    <div class="ctop">
+      <div><div class="ctitle">Bangalore Daily Orders</div><div class="csub">Supertails MCP · City = Bangalore · Order count</div></div>
+      <div style="text-align:right;">
+        <div style="font-size:18px;font-weight:700;color:var(--text);" id="v_blr_orders">—</div>
+        <div style="font-size:10px;color:var(--muted);">latest day</div>
+        <div id="d_blr_orders" class="sdelta grey" style="margin-top:2px;">—</div>
+      </div>
+    </div>
+    <div class="cwrap"><canvas id="ch_blr_orders"></canvas></div>
+  </div>
+  <div class="ccrd">
+    <div class="ctop">
+      <div><div class="ctitle">Bangalore NMV (₹)</div><div class="csub">Supertails MCP · City = Bangalore · Net Merchandise Value</div></div>
+      <div style="text-align:right;">
+        <div style="font-size:18px;font-weight:700;color:var(--text);" id="v_blr_rev">—</div>
+        <div style="font-size:10px;color:var(--muted);">latest day</div>
+        <div id="d_blr_rev" class="sdelta grey" style="margin-top:2px;">—</div>
+      </div>
+    </div>
+    <div class="cwrap"><canvas id="ch_blr_rev"></canvas></div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:14px;">
+  <div class="sec-hdr"><div class="sec-hdr-num">9</div><div class="sec-hdr-label">Paid Breakdown — <span id="paidBreakLabel"></span></div></div>
 </div>
 <div class="charts">
   <div class="ccrd"><div class="ctop"><div><div class="ctitle">Brand Campaign Sessions</div><div class="csub">GA4 · Campaigns with "Brand" · All India</div></div></div><div class="cwrap"><canvas id="ch3"></canvas></div></div>
@@ -1673,7 +1701,7 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
 
 <!-- SOV + SENTIMENT -->
 <div class="section" style="margin-top:14px;">
-  <div class="sec-hdr"><div class="sec-hdr-num">9</div><div class="sec-hdr-label">Share of Voice &amp; Sentiment — Latest data point</div></div>
+  <div class="sec-hdr"><div class="sec-hdr-num">10</div><div class="sec-hdr-label">Share of Voice &amp; Sentiment — Latest data point</div></div>
 </div>
 <div class="sov-row">
   <div class="sov-crd">
@@ -2441,6 +2469,8 @@ function sliceByDate(start,end){
     direct_installs:     sl(S.direct_installs),   // organic installs (brand-driven)
     paid_installs:       sl(S.paid_installs),      // paid installs
     revenue_india:       sl(S.revenue_india),
+    revenue_blr:         sl(S.revenue_blr),
+    orders_blr:          sl(S.orders_blr),
     // All-traffic split
     total_nonpaid_sessions: sc('total_nonpaid'),
     total_paid_sessions:    _total_paid,
@@ -2780,6 +2810,50 @@ function renderDashboard(slice,g){
                 : g==='M' ? (baselines.revenue_india_weekly||0)*30/7
                 : baselines.revenue_india_daily||0;
   mkChart('ch_rev', revL, [ds(revV,'India NMV (\u20B9)','#14b8a6','#14b8a622'), baseds(revBase, revL.length)],{currency:true,csIdx:csIdx(revSK,g)});
+
+  // ── BLR Orders + Revenue charts ──────────────────────────────────────────
+  {
+    const BLR_ORD_BASE = 639;   // baseline daily avg Jan5–Mar22
+    const BLR_REV_BASE = 1142000; // baseline daily avg NMV
+    const blrOrl = document.getElementById('blrOrdRangeLabel');
+    if(blrOrl) blrOrl.textContent = rng;
+
+    // Orders chart
+    const {labels:boL, values:boV, sortKeys:boSK} = aggregate(slice.dates, slice.orders_blr, g);
+    const boBase = g==='W' ? BLR_ORD_BASE*7 : g==='M' ? BLR_ORD_BASE*30 : BLR_ORD_BASE;
+    mkChart('ch_blr_orders', boL, [ds(boV,'BLR Orders','#f97316','#f9731626'), baseds(boBase, boL.length)],{csIdx:csIdx(boSK,g)});
+
+    // Revenue chart
+    const {labels:brL, values:brV, sortKeys:brSK} = aggregate(slice.dates, slice.revenue_blr, g);
+    const brBase = g==='W' ? BLR_REV_BASE*7 : g==='M' ? BLR_REV_BASE*30 : BLR_REV_BASE;
+    mkChart('ch_blr_rev', brL, [ds(brV,'BLR NMV (\u20B9)','#f59e0b','#f59e0b26'), baseds(brBase, brL.length)],{currency:true,csIdx:csIdx(brSK,g)});
+
+    // KPI cards — latest day
+    const blrOrdVals = slice.orders_blr.filter(v=>v!=null);
+    const blrRevVals = slice.revenue_blr.filter(v=>v!=null);
+    if(blrOrdVals.length){
+      const latest = blrOrdVals[blrOrdVals.length-1];
+      const el = document.getElementById('v_blr_orders');
+      if(el) el.textContent = latest.toLocaleString();
+      const dl = document.getElementById('d_blr_orders');
+      if(dl){
+        const pct = ((latest/BLR_ORD_BASE)-1)*100;
+        dl.textContent = (pct>=0?'+':'')+pct.toFixed(1)+'% vs baseline';
+        dl.className = 'sdelta '+(pct>=5?'green':pct<=-5?'red':'grey');
+      }
+    }
+    if(blrRevVals.length){
+      const latest = blrRevVals[blrRevVals.length-1];
+      const el = document.getElementById('v_blr_rev');
+      if(el) el.textContent = '\u20B9'+(latest/1e5).toFixed(1)+'L';
+      const dl = document.getElementById('d_blr_rev');
+      if(dl){
+        const pct = ((latest/BLR_REV_BASE)-1)*100;
+        dl.textContent = (pct>=0?'+':'')+pct.toFixed(1)+'% vs baseline';
+        dl.className = 'sdelta '+(pct>=5?'green':pct<=-5?'red':'grey');
+      }
+    }
+  }
 
   // Sparklines — 28-day daily trend on signal cards
   renderSparkline('spark1',    slice.branded_search,        ORANGE);
