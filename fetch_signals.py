@@ -1459,6 +1459,16 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
 <!-- SIGNAL CARDS -->
 <div class="section"><div class="sec-title">Signal Health — Selected Period vs Baseline</div></div>
 <div class="cards">
+  <div class="card" id="c_blr_orders" style="border-left:3px solid #f97316;">
+    <div class="s-bar" id="b_blr_orders"></div>
+    <div class="stitle">🏙 Bangalore Orders</div>
+    <div><span class="sval" id="v_blr_orders_card">—</span><span class="sunit" id="su_blr_orders">orders/day</span></div>
+    <div class="smeta"><span class="sbase" id="bl_blr_orders">Baseline: 639/day</span><span class="sdelta" id="d_blr_orders_card">—</span></div>
+    <div class="scmp" id="cmp_blr_orders"></div>
+    <div class="spark-wrap"><canvas id="spark_blr_orders" height="36"></canvas></div>
+    <div class="stool">Supertails MCP · City = Bangalore · Offline campaign signal</div>
+    <div class="sfresh" id="fr_blr_orders">—</div>
+  </div>
   <div class="card" id="c1">
     <div class="s-bar" id="b1"></div>
     <div class="stitle">Branded Search</div>
@@ -2705,6 +2715,22 @@ function renderDashboard(slice,g){
   updateCard('v2','bl2','d2','b2','cmp2',a2,granBase(baselines.direct_installs_india||baselines.direct_installs_bangalore),15);
   updateCard('v3','bl3','d3','b3','cmp3',a3,granBase(baselines.total_nonpaid_sessions_india||0),20);
   updateCard('v4','bl4','d4','b4','cmp4',a4,granBase(baselines.brand_mentions||0),20);
+
+  // ── BLR Orders top card ──────────────────────────────────────────────────
+  {
+    const BLR_ORD_BASE_DAY = 639;
+    const ablr = granVal(slice.orders_blr);
+    const blrBase = granBase(BLR_ORD_BASE_DAY);
+    updateCard('v_blr_orders_card','bl_blr_orders','d_blr_orders_card','b_blr_orders','cmp_blr_orders',ablr,blrBase,10);
+    // Override unit label per granularity
+    const suBlr = document.getElementById('su_blr_orders');
+    if(suBlr) suBlr.textContent = 'orders/'+unitSuffix;
+    // Freshness — last non-null date
+    const blrDates = slice.dates.filter((_,i)=>slice.orders_blr[i]!=null);
+    const frBlr = document.getElementById('fr_blr_orders');
+    if(frBlr && blrDates.length) frBlr.textContent = 'Updated: '+blrDates[blrDates.length-1];
+    renderSparkline('spark_blr_orders', slice.orders_blr, '#f97316');
+  }
 
   // Spend cards
   const aBS = granVal(slice.brand_spend);
