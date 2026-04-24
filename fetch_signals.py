@@ -1522,10 +1522,6 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
       <div style="font-size:10px;color:#94a3b8;">Meltwater plugin required</div>
     </div>
   </div>
-</div>
-
-<!-- SPEND CARDS -->
-<div class="cards" style="margin-top:6px;">
   <div class="card" id="c_brand_spend">
     <div class="s-bar" id="b_brand_spend"></div>
     <div class="stitle">Brand Spend (BM)</div>
