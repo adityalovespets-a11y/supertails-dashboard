@@ -1463,7 +1463,7 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
     <div class="s-bar" id="b_blr_orders"></div>
     <div class="stitle">🏙 Bangalore Orders</div>
     <div><span class="sval" id="v_blr_orders_card">—</span><span class="sunit" id="su_blr_orders">orders/day</span></div>
-    <div class="smeta"><span class="sbase" id="bl_blr_orders">Baseline: 639/day</span><span class="sdelta" id="d_blr_orders_card">—</span></div>
+    <div class="smeta"><span class="sbase" id="bl_blr_orders">Baseline: —</span><span class="sdelta" id="d_blr_orders_card">—</span></div>
     <div class="scmp" id="cmp_blr_orders"></div>
     <div class="spark-wrap"><canvas id="spark_blr_orders" height="36"></canvas></div>
     <div class="stool">Supertails MCP · City = Bangalore · Offline campaign signal</div>
@@ -2714,9 +2714,9 @@ function renderDashboard(slice,g){
 
   // ── BLR Orders top card ──────────────────────────────────────────────────
   {
-    const BLR_ORD_BASE_DAY = 639;
+    const BLR_ORD_BASE_WK = 691*7;  // March avg: 691/day → 4837/wk (granBase expects weekly)
     const ablr = granVal(slice.orders_blr);
-    const blrBase = granBase(BLR_ORD_BASE_DAY);
+    const blrBase = granBase(BLR_ORD_BASE_WK);
     updateCard('v_blr_orders_card','bl_blr_orders','d_blr_orders_card','b_blr_orders','cmp_blr_orders',ablr,blrBase,10);
     // Override unit label per granularity
     const suBlr = document.getElementById('su_blr_orders');
@@ -2835,7 +2835,7 @@ function renderDashboard(slice,g){
 
   // ── BLR Orders + Revenue charts ──────────────────────────────────────────
   {
-    const BLR_ORD_BASE = 639;   // baseline daily avg Jan5–Mar22
+    const BLR_ORD_BASE = 691;   // baseline daily avg March 2026
     const BLR_REV_BASE = 1142000; // baseline daily avg NMV
     const blrOrl = document.getElementById('blrOrdRangeLabel');
     if(blrOrl) blrOrl.textContent = rng;
@@ -2859,7 +2859,7 @@ function renderDashboard(slice,g){
       if(el) el.textContent = latest.toLocaleString();
       const dl = document.getElementById('d_blr_orders');
       if(dl){
-        const pct = ((latest/BLR_ORD_BASE)-1)*100;
+        const pct = ((latest/691)-1)*100;
         dl.textContent = (pct>=0?'+':'')+pct.toFixed(1)+'% vs baseline';
         dl.className = 'sdelta '+(pct>=5?'green':pct<=-5?'red':'grey');
       }
