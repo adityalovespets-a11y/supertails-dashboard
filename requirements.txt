@@ -1,0 +1,15 @@
+# Supertails Offline Campaign Dashboard — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Google APIs
+google-api-python-client>=2.100.0
+google-auth>=2.23.0
+google-auth-httplib2>=0.1.1
+google-analytics-data>=0.17.0
+
+# HTTP / Data
+requests>=2.31.0
+pandas>=2.0.0
+
+# Utilities
+python-dateutil>=2.8.2
