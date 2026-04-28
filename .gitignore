@@ -1,0 +1,7 @@
+gsc_service_account.json
+*.pem
+*.key
+.env
+.env.*
+__pycache__/
+*.pyc
