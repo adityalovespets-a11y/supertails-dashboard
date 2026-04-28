@@ -55,7 +55,8 @@ def load_config(path="config.json"):
 # ─────────────────────────────────────────────────────────────────────────────
 
 SIGNAL_KEYS = [
-    "branded_search", "direct_installs", "total_installs", "paid_installs", "direct_installs_blr",
+    "branded_search", "direct_installs", "total_installs", "paid_installs",
+    "direct_installs_blr", "paid_installs_blr",
     # Revenue
     "revenue_india", "revenue_blr", "orders_blr",
     # GA4 traffic — all channels
@@ -72,7 +73,7 @@ SIGNAL_KEYS = [
 ]
 
 # Keys that are dicts (not parallel arrays) — preserved separately in merge
-DICT_KEYS = ["city_sessions", "city_list", "gsc_queries", "campaign_daily"]
+DICT_KEYS = ["city_sessions", "city_list", "gsc_queries", "campaign_daily", "installs_city_daily"]
 
 def empty_store():
     store = {"schema_version": SCHEMA_VERSION, "last_fetched_to": None, "dates": []}
@@ -825,6 +826,171 @@ def fetch_top_queries_gsc(config, windows=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SIGNAL 2b — INSTALLS FROM GOOGLE SHEET (replaces manual CSV when configured)
+# Long format: date × pincode × city × media_source × platform × installs.
+# Rolls up pincodes → cities, classifies media_source → organic/paid.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_installs_from_sheet(config):
+    """
+    Returns {
+        'india':     { 'YYYY-MM-DD': {'organic': n, 'paid': n, 'total': n}, ... },
+        'bangalore': { 'YYYY-MM-DD': {'organic': n, 'paid': n, 'total': n}, ... },
+        'cities':    { 'YYYY-MM-DD': { 'Bangalore': {'organic': n, 'paid': n, 'total': n}, ... }, ... }
+    }
+    """
+    import re as _re
+
+    af  = config.get("appsflyer", {})
+    cfg = af.get("sheet", {})
+    if not cfg.get("enabled"):
+        return None
+    sheet_id = cfg.get("sheet_id", "")
+    if not sheet_id or sheet_id.startswith("PASTE_") or sheet_id.startswith("YOUR_"):
+        print("    ℹ  Installs sheet: no sheet_id configured — skipping (CSV fallback active)")
+        return None
+
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+
+        key_path = (config.get("google_sheets", {}) or {}).get("service_account_key_path") or \
+                   config.get("google_search_console", {}).get("service_account_key_path")
+        if not key_path:
+            print("    ✗ Installs sheet: no service_account_key_path")
+            return None
+
+        creds = service_account.Credentials.from_service_account_file(
+            key_path, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+        )
+        svc = build("sheets", "v4", credentials=creds)
+
+        tab_name  = cfg.get("tab_name", "Installs_Raw")
+        cols      = cfg.get("columns", {})
+        date_c    = int(cols.get("date", 0))
+        pin_c     = int(cols.get("pincode", 1))
+        city_c    = int(cols.get("city", 2))
+        src_c     = int(cols.get("media_source", 4))
+        installs_c = int(cols.get("installs", 6))
+        max_c = max(date_c, pin_c, city_c, src_c, installs_c)
+
+        organic_set = set(s.lower() for s in cfg.get("organic_sources", ["organic","(none)","direct",""]))
+        tracked     = set(cfg.get("tracked_cities", []))
+        aliases     = {k.lower(): v for k, v in (cfg.get("city_aliases") or {}).items()}
+        pin_map     = cfg.get("pincode_prefix_to_city", {})
+
+        end_col_letter = ""
+        n = max_c
+        while True:
+            n, r = divmod(n, 26)
+            end_col_letter = chr(65 + r) + end_col_letter
+            if n == 0: break
+            n -= 1
+        range_name = f"{tab_name}!A:{end_col_letter}"
+
+        print(f"    → Installs sheet: {sheet_id[:20]}... | Tab: '{tab_name}' | Range: {range_name}")
+        result = svc.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range=range_name,
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute()
+        rows = result.get("values", [])
+        if not rows:
+            print("    ✗ Installs sheet: empty")
+            return None
+
+        def parse_date(v):
+            if v is None or v == "": return None
+            sv = str(v).strip()
+            if _re.match(r'^\d{4}-\d{2}-\d{2}$', sv):
+                return sv
+            m = _re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', sv)
+            if m:
+                return f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}"
+            try:
+                serial = float(sv)
+                if 40000 < serial < 60000:
+                    return (date(1899, 12, 30) + timedelta(days=int(serial))).isoformat()
+            except (ValueError, TypeError):
+                pass
+            return None
+
+        def parse_int(v):
+            if v is None or v == "": return 0
+            try:
+                return int(float(str(v).replace(",", "").strip()))
+            except (ValueError, TypeError):
+                return 0
+
+        def resolve_city(pincode_raw, city_raw):
+            # 1. Try city column first — exact match or alias to a tracked city
+            city_resolved = None
+            if city_raw:
+                c = str(city_raw).strip()
+                if c:
+                    canonical = aliases.get(c.lower(), c)
+                    if canonical in tracked:
+                        return canonical
+                    city_resolved = canonical  # remember it; may downgrade to Other later
+            # 2. Pincode prefix takes precedence when city is unrecognized — this
+            #    handles raw event data with hyper-granular city names like
+            #    "Connaught Place" / "Darya Ganj" that all roll up to Delhi.
+            if pincode_raw not in (None, ""):
+                pin = str(pincode_raw).strip().split(".")[0]
+                if len(pin) >= 3:
+                    mapped = pin_map.get(pin[:3])
+                    if mapped and mapped in tracked:
+                        return mapped
+            # 3. Fall back to whatever the city column gave us (or Unknown)
+            return "Other" if city_resolved else "Unknown"
+
+        india  = {}   # date → {organic, paid, total}
+        cities = {}   # date → {city → {organic, paid, total}}
+        skipped = 0
+        bad_dates = 0
+
+        for row in rows:
+            row = list(row) + [''] * (max_c + 1 - len(row))
+            d = parse_date(row[date_c])
+            if not d:
+                if row[date_c] not in (None, ''):
+                    bad_dates += 1
+                else:
+                    skipped += 1
+                continue
+            installs = parse_int(row[installs_c])
+            if installs <= 0:
+                continue
+            src = str(row[src_c] or "").strip().lower()
+            bucket = "organic" if src in organic_set else "paid"
+            city = resolve_city(row[pin_c], row[city_c])
+
+            d_india = india.setdefault(d, {"organic": 0, "paid": 0, "total": 0})
+            d_india[bucket] += installs
+            d_india["total"] += installs
+
+            d_cities = cities.setdefault(d, {})
+            c_buck = d_cities.setdefault(city, {"organic": 0, "paid": 0, "total": 0})
+            c_buck[bucket] += installs
+            c_buck["total"] += installs
+
+        # Bangalore convenience subset
+        blr = {d: cities[d].get("Bangalore", {"organic": 0, "paid": 0, "total": 0})
+               for d in cities}
+
+        days = len(india)
+        org_total  = sum(v["organic"] for v in india.values())
+        paid_total = sum(v["paid"]    for v in india.values())
+        if bad_dates:
+            print(f"    ⚠  Installs sheet: {bad_dates} rows with unparseable dates skipped")
+        print(f"    ✓ Installs sheet: {days} days — organic={org_total:,}, paid={paid_total:,}, "
+              f"cities tracked={len(tracked)}")
+        return {"india": india, "bangalore": blr, "cities": cities}
+    except Exception as e:
+        print(f"    ✗ Installs sheet failed: {e}")
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SIGNAL 5 — SPEND (Google Sheet: Unified Dashboard - Supertails, d-1)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -998,10 +1164,25 @@ def fetch_and_merge(config, store, start_date, end_date):
     gsc_queries = fetch_top_queries_gsc(config)
 
     print(f"  [2/4] Direct App Installs (AppsFlyer)")
-    af_result      = fetch_direct_installs_daily(config, start_date, end_date)
-    af_total_daily = af_result.get("total", {})
-    af_india_daily = af_result.get("india", {})
-    af_blr_daily   = af_result.get("bangalore", {})
+    sheet_installs = fetch_installs_from_sheet(config)
+    if sheet_installs is not None:
+        # Sheet is the source of truth when configured
+        india_breakdown    = sheet_installs["india"]
+        blr_breakdown      = sheet_installs["bangalore"]
+        installs_city_daily = sheet_installs["cities"]
+        af_total_daily   = {d: v["total"]   for d, v in india_breakdown.items()}
+        af_india_daily   = {d: v["organic"] for d, v in india_breakdown.items()}
+        af_paid_daily    = {d: v["paid"]    for d, v in india_breakdown.items()}
+        af_blr_daily     = {d: v["organic"] for d, v in blr_breakdown.items()}
+        af_blr_paid_daily = {d: v["paid"]   for d, v in blr_breakdown.items()}
+    else:
+        af_result      = fetch_direct_installs_daily(config, start_date, end_date)
+        af_total_daily = af_result.get("total", {})
+        af_india_daily = af_result.get("india", {})
+        af_blr_daily   = af_result.get("bangalore", {})
+        af_paid_daily  = {}
+        af_blr_paid_daily = {}
+        installs_city_daily = {}
 
     print(f"  [3/4] Direct Web Traffic (GA4)")
     ga_daily  = fetch_direct_web_daily(config, start_date, end_date)
@@ -1023,7 +1204,9 @@ def fetch_and_merge(config, store, start_date, end_date):
             "branded_search":        gsc_daily.get(d),
             "total_installs":        af_total_daily.get(d),
             "direct_installs":       af_india_daily.get(d),
+            "paid_installs":         af_paid_daily.get(d),
             "direct_installs_blr":   af_blr_daily.get(d),
+            "paid_installs_blr":     af_blr_paid_daily.get(d),
             "direct_sessions":         web.get("sessions"),
             "direct_new_users":        web.get("new_users"),
             "total_paid_sessions":     web.get("total_paid_sessions"),
@@ -1056,6 +1239,14 @@ def fetch_and_merge(config, store, start_date, end_date):
                 for camp, spend_val in camps.items():
                     existing_campaign_daily[d][camp] = spend_val  # overwrite with latest fetch
     merged["campaign_daily"] = existing_campaign_daily
+
+    # Merge per-city installs breakdown (dict-key: date → {city: {organic, paid, total}})
+    if installs_city_daily:
+        existing_city_installs = merged.get("installs_city_daily", {})
+        for d, by_city in installs_city_daily.items():
+            existing_city_installs[d] = by_city  # sheet is source of truth — overwrite
+        merged["installs_city_daily"] = existing_city_installs
+
     return merged
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1138,127 +1329,171 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Supertails Brand Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js" onerror="window._chartMissing=true;window.Chart=function(ctx,cfg){this.destroy=()=>{};this.data=cfg.data||{};ctx.canvas&&(ctx.canvas.parentElement.innerHTML='<div style=\\'padding:18px;color:#9CA3AF;font-size:12px;text-align:center;\\'>Charts require an internet connection</div>');};"></script>
 <style>
 :root {
-  --orange:#E8450A; --navy:#1B2A3B; --navy2:#243447; --navy-light:#3B5068;
-  --bg:#F0F2F5; --card:#fff; --text:#1B2A3B; --muted:#6B7280;
-  --green:#16A34A; --green-bg:#DCFCE7; --yellow:#D97706; --yellow-bg:#FEF3C7;
-  --red:#DC2626; --red-bg:#FEE2E2; --grey:#9CA3AF; --grey-bg:#F3F4F6;
-  --border:#E5E7EB; --r:12px;
+  /* Brand palette — Supertails Brand Guidelines 2026 */
+  --brand-green:#19be05;        /* CTA Fill / primary positive */
+  --brand-green-stroke:#75b52f; /* CTA Stroke / secondary line */
+  --brand-orange:#ff6914;       /* Accent / paid / attention */
+  --brand-orange-stroke:#ca5310;/* Alert / negative delta */
+  --ink:#0a0a0a;                /* Black for headers */
+  --paper:#f5f8fa;              /* Off-white page bg */
+  --white:#ffffff;
+  /* Legacy aliases — kept so existing class references still resolve */
+  --orange:var(--brand-orange);
+  --navy:var(--ink);
+  --navy2:#1f2937;
+  --navy-light:#4b5563;
+  --bg:var(--paper);
+  --card:var(--white);
+  --text:var(--ink);
+  --muted:#6b7280;
+  --green:var(--brand-green);
+  --green-bg:#e7f8e3;
+  --yellow:#d97706;
+  --yellow-bg:#fef3c7;
+  --red:var(--brand-orange-stroke);
+  --red-bg:#fee2e2;
+  --grey:#9ca3af;
+  --grey-bg:#f3f4f6;
+  --border:#e5e7eb;
+  --r:14px;
 }
 *{box-sizing:border-box;margin:0;padding:0;}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-     background:var(--bg);color:var(--text);font-size:14px;}
+body{font-family:'Nunito Sans',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+     background:var(--bg);color:var(--text);font-size:14px;font-weight:500;
+     -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;}
 
-/* HEADER */
-.hdr{background:var(--navy);color:#fff;padding:14px 28px;
-     display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;}
+/* HEADER — light, brand-aligned */
+.hdr{background:var(--white);color:var(--ink);padding:18px 28px;
+     display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;
+     border-bottom:1px solid var(--border);}
 .hdr-left{display:flex;align-items:center;gap:16px;}
-.logo{font-size:17px;font-weight:800;letter-spacing:1.5px;color:var(--orange);}
-.hdr-title{font-size:14px;font-weight:600;color:rgba(255,255,255,.9);}
-.hdr-sub{font-size:11px;color:rgba(255,255,255,.45);margin-top:2px;}
+.logo{font-size:18px;font-weight:900;letter-spacing:.5px;color:var(--brand-green);}
+.hdr-title{font-size:15px;font-weight:700;color:var(--ink);}
+.hdr-sub{font-size:11px;color:var(--muted);margin-top:2px;font-weight:500;}
 .hdr-right{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
 .signal-status{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
-.sig-pill{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;
-          font-size:10px;font-weight:600;letter-spacing:.3px;white-space:nowrap;}
-.sig-pill.live{background:rgba(22,163,74,.18);color:#86efac;}
-.sig-pill.wait{background:rgba(234,179,8,.15);color:#fde68a;}
-.sig-pill.off{background:rgba(255,255,255,.08);color:rgba(255,255,255,.35);}
+.sig-pill{display:flex;align-items:center;gap:5px;padding:5px 11px;border-radius:20px;
+          font-size:10px;font-weight:700;letter-spacing:.3px;white-space:nowrap;}
+.sig-pill.live{background:rgba(25,190,5,.12);color:var(--brand-green-stroke);}
+.sig-pill.wait{background:rgba(217,119,6,.12);color:#b45309;}
+.sig-pill.off{background:var(--grey-bg);color:var(--muted);}
 .sig-pill .dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;}
-.sig-pill.live .dot{background:#22c55e;}
-.sig-pill.wait .dot{background:#eab308;}
-.sig-pill.off .dot{background:rgba(255,255,255,.25);}
-.freshness{font-size:11px;color:rgba(255,255,255,.55);}
-.freshness b{color:rgba(255,255,255,.85);}
-.refresh-ctrl{display:flex;align-items:center;gap:6px;font-size:11px;color:rgba(255,255,255,.5);}
-.refresh-toggle{width:32px;height:16px;background:rgba(255,255,255,.15);border-radius:8px;
-                position:relative;cursor:pointer;border:none;transition:background .2s;}
-.refresh-toggle.on{background:var(--orange);}
+.sig-pill.live .dot{background:var(--brand-green);}
+.sig-pill.wait .dot{background:#d97706;}
+.sig-pill.off .dot{background:var(--grey);}
+.freshness{font-size:11px;color:var(--muted);font-weight:600;}
+.freshness b{color:var(--ink);font-weight:800;}
+.refresh-ctrl{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);font-weight:600;}
+.refresh-toggle{width:32px;height:16px;background:var(--grey-bg);border-radius:8px;
+                position:relative;cursor:pointer;border:1px solid var(--border);transition:background .2s;}
+.refresh-toggle.on{background:var(--brand-green);border-color:var(--brand-green);}
 .refresh-toggle::after{content:'';width:12px;height:12px;background:#fff;border-radius:50%;
-                       position:absolute;top:2px;left:2px;transition:left .2s;}
-.refresh-toggle.on::after{left:18px;}
+                       position:absolute;top:1px;left:2px;transition:left .2s;
+                       box-shadow:0 1px 2px rgba(0,0,0,.2);}
+.refresh-toggle.on::after{left:17px;}
 
-/* CONTROLS BAR */
-.controls{background:var(--navy2);padding:12px 28px;
-          display:flex;align-items:center;gap:16px;flex-wrap:wrap;border-bottom:1px solid rgba(255,255,255,.07);}
-.ctrl-label{font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;
-            color:rgba(255,255,255,.45);white-space:nowrap;}
-.date-input{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);
-            color:#fff;border-radius:6px;padding:5px 8px;font-size:12px;outline:none;cursor:pointer;}
-.date-input::-webkit-calendar-picker-indicator{filter:invert(1);opacity:.6;cursor:pointer;}
-.ctrl-arrow{color:rgba(255,255,255,.4);font-size:13px;}
-.ctrl-divider{width:1px;height:24px;background:rgba(255,255,255,.12);}
-.gran-btns{display:flex;gap:2px;}
-.gran-btn{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);
-          color:rgba(255,255,255,.6);border-radius:5px;padding:4px 10px;
-          font-size:11px;font-weight:600;cursor:pointer;transition:all .15s;}
-.gran-btn.active{background:var(--orange);border-color:var(--orange);color:#fff;}
-.apply-btn{background:var(--orange);color:#fff;border:none;border-radius:6px;
-           padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;transition:opacity .15s;white-space:nowrap;}
-.apply-btn:hover{opacity:.85;}
+/* CONTROLS BAR — clean light strip */
+.controls{background:var(--white);padding:14px 28px;
+          display:flex;align-items:center;gap:16px;flex-wrap:wrap;border-bottom:1px solid var(--border);}
+.ctrl-label{font-size:11px;font-weight:800;letter-spacing:.8px;text-transform:uppercase;
+            color:var(--muted);white-space:nowrap;}
+.date-input{background:var(--paper);border:1px solid var(--border);
+            color:var(--ink);border-radius:8px;padding:6px 10px;font-size:12px;
+            font-family:inherit;font-weight:600;outline:none;cursor:pointer;
+            transition:border-color .15s;}
+.date-input:hover{border-color:var(--brand-green);}
+.date-input:focus{border-color:var(--brand-green);box-shadow:0 0 0 3px rgba(25,190,5,.12);}
+.date-input::-webkit-calendar-picker-indicator{opacity:.6;cursor:pointer;}
+.ctrl-arrow{color:var(--muted);font-size:13px;}
+.ctrl-divider{width:1px;height:24px;background:var(--border);}
+.gran-btns{display:flex;gap:2px;background:var(--grey-bg);padding:3px;border-radius:8px;}
+.gran-btn{background:transparent;border:none;
+          color:var(--muted);border-radius:5px;padding:5px 12px;
+          font-size:11px;font-weight:700;cursor:pointer;transition:all .15s;font-family:inherit;}
+.gran-btn:hover{color:var(--ink);}
+.gran-btn.active{background:var(--white);color:var(--brand-green);
+                 box-shadow:0 1px 3px rgba(0,0,0,.08);}
+.apply-btn{background:var(--brand-green);color:#fff;border:none;border-radius:8px;
+           padding:7px 16px;font-size:12px;font-weight:800;cursor:pointer;
+           transition:all .15s;white-space:nowrap;font-family:inherit;
+           box-shadow:0 1px 3px rgba(25,190,5,.3);}
+.apply-btn:hover{background:var(--brand-green-stroke);transform:translateY(-1px);
+                 box-shadow:0 2px 6px rgba(25,190,5,.4);}
 
-/* COMPARE PANEL */
-.cmp-panel{background:#111e2b;padding:10px 28px;
+/* COMPARE PANEL — soft cream */
+.cmp-panel{background:var(--paper);padding:11px 28px;
            display:flex;align-items:center;gap:14px;flex-wrap:wrap;
-           border-bottom:1px solid rgba(255,255,255,.06);}
-.period-tag{font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px;white-space:nowrap;}
-.tag-a{background:var(--orange);color:#fff;}
-.tag-b{background:var(--navy-light);color:#fff;border:1px solid rgba(255,255,255,.15);}
-.cmp-reset{background:transparent;color:rgba(255,255,255,.4);border:1px solid rgba(255,255,255,.15);
-           border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;transition:all .15s;}
-.cmp-reset:hover{color:#fff;border-color:rgba(255,255,255,.35);}
-.cmp-active{background:rgba(232,69,10,.2);border:1px solid var(--orange);color:var(--orange);
-            font-size:10px;font-weight:700;padding:2px 9px;border-radius:20px;display:none;white-space:nowrap;}
+           border-bottom:1px solid var(--border);}
+.period-tag{font-size:10px;font-weight:800;padding:3px 9px;border-radius:5px;white-space:nowrap;
+            letter-spacing:.4px;}
+.tag-a{background:var(--brand-green);color:#fff;}
+.tag-b{background:var(--white);color:var(--ink);border:1px solid var(--border);}
+.cmp-reset{background:var(--white);color:var(--muted);border:1px solid var(--border);
+           border-radius:8px;padding:6px 12px;font-size:11px;font-weight:700;
+           cursor:pointer;transition:all .15s;font-family:inherit;}
+.cmp-reset:hover{color:var(--ink);border-color:var(--ink);}
+.cmp-active{background:rgba(25,190,5,.12);border:1px solid var(--brand-green);
+            color:var(--brand-green-stroke);
+            font-size:10px;font-weight:800;padding:3px 10px;border-radius:20px;display:none;white-space:nowrap;}
 
-/* CITY FILTER */
-.city-bar{background:#1a2535;padding:9px 28px;display:flex;align-items:center;
-          gap:8px;flex-wrap:wrap;border-bottom:1px solid rgba(255,255,255,.06);}
-.city-btn{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);
-          color:rgba(255,255,255,.6);border-radius:20px;padding:4px 13px;
-          font-size:11px;font-weight:600;cursor:pointer;transition:all .15s;white-space:nowrap;}
-.city-btn:hover{background:rgba(255,255,255,.12);color:#fff;}
-.city-btn.active{background:var(--orange);border-color:var(--orange);color:#fff;}
-.city-note{font-size:10px;color:rgba(255,255,255,.3);margin-left:6px;font-style:italic;}
+/* CITY FILTER — pill row on light */
+.city-bar{background:var(--white);padding:11px 28px;display:flex;align-items:center;
+          gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--border);}
+.city-btn{background:var(--paper);border:1px solid var(--border);
+          color:var(--muted);border-radius:20px;padding:5px 14px;
+          font-size:11px;font-weight:700;cursor:pointer;transition:all .15s;
+          white-space:nowrap;font-family:inherit;}
+.city-btn:hover{background:var(--white);color:var(--ink);border-color:var(--ink);}
+.city-btn.active{background:var(--brand-green);border-color:var(--brand-green);color:#fff;
+                 box-shadow:0 1px 3px rgba(25,190,5,.3);}
+.city-note{font-size:10px;color:var(--muted);margin-left:6px;font-style:italic;}
 
 /* SIGNAL TOGGLE BUTTONS */
 .toggle-row{display:flex;flex-wrap:wrap;gap:6px;padding:0 28px 10px;}
-.tog-btn{background:rgba(255,255,255,.07);border:2px solid rgba(255,255,255,.15);
-         color:rgba(255,255,255,.5);border-radius:20px;padding:5px 14px;
-         font-size:11px;font-weight:700;cursor:pointer;transition:all .15s;white-space:nowrap;}
-.tog-btn:hover{background:rgba(255,255,255,.12);color:#fff;}
-.tog-btn.active{background:color-mix(in srgb,var(--tc,#6366f1) 20%,transparent);
-                border-color:var(--tc,#6366f1);color:#fff;}
+.tog-btn{background:var(--white);border:2px solid var(--border);
+         color:var(--muted);border-radius:20px;padding:6px 15px;
+         font-size:11px;font-weight:800;cursor:pointer;transition:all .15s;
+         white-space:nowrap;font-family:inherit;}
+.tog-btn:hover{background:var(--paper);color:var(--ink);}
+.tog-btn.active{background:color-mix(in srgb,var(--tc,#19be05) 14%,white);
+                border-color:var(--tc,#19be05);color:var(--ink);}
 
 /* COMPARE SUMMARY */
-.cmp-summary{display:none;margin:14px 28px 0;background:rgba(232,69,10,.06);
-             border:1px solid rgba(232,69,10,.2);border-radius:var(--r);padding:14px 18px;}
-.cmp-sum-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;
-               color:var(--orange);margin-bottom:10px;}
+.cmp-summary{display:none;margin:14px 28px 0;background:rgba(25,190,5,.05);
+             border:1px solid rgba(25,190,5,.18);border-radius:var(--r);padding:16px 20px;}
+.cmp-sum-title{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.8px;
+               color:var(--brand-green-stroke);margin-bottom:10px;}
 .cmp-sum-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}
 @media(max-width:700px){.cmp-sum-grid{grid-template-columns:repeat(2,1fr);}}
-.cmp-sum-item .lbl{font-size:11px;color:var(--muted);margin-bottom:4px;}
+.cmp-sum-item .lbl{font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600;}
 .cmp-sum-item .vals{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
-.av{font-size:14px;font-weight:700;color:var(--orange);}
-.bv{font-size:14px;font-weight:700;color:var(--navy);}
-.chg{font-size:11px;font-weight:700;padding:2px 7px;border-radius:10px;}
+.av{font-size:14px;font-weight:800;color:var(--brand-green-stroke);}
+.bv{font-size:14px;font-weight:800;color:var(--ink);}
+.chg{font-size:11px;font-weight:800;padding:3px 8px;border-radius:10px;}
 
 /* ALERT */
 .alert-bar{background:#FEF2F2;border:1px solid #FECACA;border-radius:var(--r);
-           padding:11px 16px;display:flex;align-items:center;gap:8px;
-           font-size:13px;font-weight:600;color:var(--red);margin:14px 28px 0;}
+           padding:12px 18px;display:flex;align-items:center;gap:8px;
+           font-size:13px;font-weight:700;color:var(--brand-orange-stroke);margin:14px 28px 0;}
 .alert-bar.hidden{display:none;}
 
 /* SECTION */
-.section{padding:20px 28px 0;}
-.sec-title{font-size:10px;font-weight:700;letter-spacing:1.2px;color:var(--muted);
-           text-transform:uppercase;margin-bottom:12px;}
-.sec-hdr{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
-.sec-hdr-num{width:22px;height:22px;border-radius:50%;background:var(--orange);
-             color:#fff;font-size:10px;font-weight:800;display:flex;align-items:center;
-             justify-content:center;flex-shrink:0;line-height:1;}
-.sec-hdr-label{font-size:10px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;
-               color:var(--muted);}
+.section{padding:24px 28px 0;}
+.sec-title{font-size:11px;font-weight:800;letter-spacing:.8px;color:var(--muted);
+           text-transform:uppercase;margin-bottom:14px;}
+.sec-hdr{display:flex;align-items:center;gap:12px;margin-bottom:12px;}
+.sec-hdr-num{width:26px;height:26px;border-radius:50%;background:var(--brand-green);
+             color:#fff;font-size:11px;font-weight:900;display:flex;align-items:center;
+             justify-content:center;flex-shrink:0;line-height:1;
+             box-shadow:0 1px 3px rgba(25,190,5,.3);}
+.sec-hdr-label{font-size:12px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;
+               color:var(--ink);}
 
 /* SIGNAL CARDS */
 .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:16px 28px 0;}
@@ -1271,10 +1506,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
 .s-bar{position:absolute;top:0;left:0;right:0;height:4px;}
 .s-bar.green{background:var(--green)}.s-bar.yellow{background:var(--yellow)}
 .s-bar.red{background:var(--red)}.s-bar.grey{background:var(--grey)}
-.snum{font-size:10px;font-weight:700;color:var(--orange);letter-spacing:1px;
-      text-transform:uppercase;margin-bottom:3px;}
-.stitle{font-size:12px;font-weight:700;margin-bottom:12px;}
-.sval{font-size:28px;font-weight:800;line-height:1;}
+.snum{font-size:10px;font-weight:800;color:var(--brand-green-stroke);letter-spacing:.6px;
+      text-transform:uppercase;margin-bottom:4px;}
+.stitle{font-size:13px;font-weight:800;margin-bottom:14px;color:var(--ink);}
+.sval{font-size:30px;font-weight:900;line-height:1;color:var(--ink);}
 .sunit{font-size:12px;color:var(--muted);margin-left:3px;}
 .smeta{margin-top:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
 .sbase{font-size:11px;color:var(--muted);}
@@ -1300,14 +1535,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
 .cmp-d{font-size:11px;font-weight:700;padding:2px 7px;border-radius:20px;}
 
 /* CHARTS */
-.charts{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;padding:12px 28px 0;}
+.charts{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;padding:12px 28px 0;}
 @media(max-width:900px){.charts{grid-template-columns:1fr;}}
-.ccrd{background:var(--card);border-radius:var(--r);padding:18px;border:1px solid var(--border);
-      box-shadow:0 1px 4px rgba(0,0,0,.06),0 4px 12px rgba(0,0,0,.04);}
-.ctop{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;}
-.ctitle{font-size:12px;font-weight:700;}
-.csub{font-size:10px;color:var(--muted);margin-top:2px;}
-.cwrap{position:relative;height:220px;}
+.ccrd{background:var(--card);border-radius:var(--r);padding:22px;border:1px solid var(--border);
+      box-shadow:0 1px 3px rgba(0,0,0,.04),0 4px 12px rgba(0,0,0,.03);
+      transition:box-shadow .2s, transform .2s;}
+.ccrd:hover{box-shadow:0 2px 6px rgba(0,0,0,.06),0 8px 20px rgba(0,0,0,.05);}
+.ctop{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;}
+.ctitle{font-size:14px;font-weight:800;color:var(--ink);}
+.csub{font-size:11px;color:var(--muted);margin-top:3px;font-weight:500;}
+.cwrap{position:relative;height:240px;}
 
 /* SOV + SENTIMENT */
 .sov-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 28px 0;}
@@ -1349,12 +1586,13 @@ table.int-t tr:last-child td{border-bottom:none;}
 footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
 
 /* ── TAB BAR ── */
-.tab-bar{background:var(--navy);display:flex;gap:0;padding:0 20px;border-bottom:2px solid rgba(255,255,255,.10);}
+.tab-bar{background:var(--white);display:flex;gap:0;padding:0 20px;border-bottom:1px solid var(--border);}
 .tab-btn{background:transparent;border:none;border-bottom:3px solid transparent;
-         color:rgba(255,255,255,.45);padding:11px 22px;font-size:12px;font-weight:700;
-         cursor:pointer;margin-bottom:-2px;transition:all .15s;letter-spacing:.4px;white-space:nowrap;}
-.tab-btn:hover{color:rgba(255,255,255,.8);}
-.tab-btn.active{color:#fff;border-bottom-color:var(--orange);}
+         color:var(--muted);padding:13px 24px;font-size:12px;font-weight:800;
+         cursor:pointer;margin-bottom:-1px;transition:all .15s;letter-spacing:.4px;
+         white-space:nowrap;font-family:inherit;}
+.tab-btn:hover{color:var(--ink);}
+.tab-btn.active{color:var(--brand-green);border-bottom-color:var(--brand-green);}
 
 /* ── CAMPAIGN BREAKDOWN ── */
 .camp-table{width:100%;border-collapse:collapse;font-size:12px;}
@@ -1373,10 +1611,10 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
 .guide-item{background:var(--bg);border-radius:8px;padding:14px;}
 .guide-item-title{font-size:11px;font-weight:700;color:var(--navy);margin-bottom:6px;}
 .guide-item-body{font-size:11px;color:var(--muted);line-height:1.6;}
-.corr-dl-btn{background:transparent;border:1px solid rgba(255,255,255,.25);color:rgba(255,255,255,.7);
-             border-radius:6px;padding:4px 12px;font-size:10px;font-weight:700;cursor:pointer;
-             letter-spacing:.3px;transition:all .15s;}
-.corr-dl-btn:hover{background:rgba(255,255,255,.1);color:#fff;border-color:rgba(255,255,255,.45);}
+.corr-dl-btn{background:var(--white);border:1px solid var(--border);color:var(--muted);
+             border-radius:8px;padding:6px 14px;font-size:10px;font-weight:800;cursor:pointer;
+             letter-spacing:.3px;transition:all .15s;font-family:inherit;}
+.corr-dl-btn:hover{background:var(--paper);color:var(--brand-green);border-color:var(--brand-green);}
 </style>
 </head>
 <body>
@@ -1418,8 +1656,8 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
   <div class="ctrl-divider"></div>
   <span class="ctrl-label">Granularity</span>
   <div class="gran-btns">
-    <button class="gran-btn" id="gD" onclick="setGran('D')">Daily</button>
-    <button class="gran-btn active" id="gW" onclick="setGran('W')">Weekly</button>
+    <button class="gran-btn active" id="gD" onclick="setGran('D')">Daily</button>
+    <button class="gran-btn" id="gW" onclick="setGran('W')">Weekly</button>
     <button class="gran-btn" id="gM" onclick="setGran('M')">Monthly</button>
   </div>
   <button class="apply-btn" onclick="applyView()">Apply</button>
@@ -1580,7 +1818,7 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
   <div class="ccrd">
     <div class="ctop">
       <div><div class="ctitle">Brand vs Performance Spend — Stacked</div><div class="csub" id="spendStackRangeLabel">Google Sheet · Daily total outlay</div></div>
-      <div id="spendSplitDisplay" style="font-size:11px;color:rgba(255,255,255,.6);"></div>
+      <div id="spendSplitDisplay" style="font-size:11px;color:var(--muted);font-weight:600;"></div>
     </div>
     <div class="cwrap" style="height:240px;"><canvas id="ch_spend_stack"></canvas></div>
   </div>
@@ -1606,6 +1844,18 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
       <div id="instSplitRatioDisplay" style="font-size:11px;color:var(--muted);text-align:right;"></div>
     </div>
     <div class="cwrap"><canvas id="ch_inst_split"></canvas></div>
+  </div>
+</div>
+<div class="charts" style="grid-template-columns:1fr;margin-top:10px;">
+  <div class="ccrd">
+    <div class="ctop">
+      <div>
+        <div class="ctitle">Installs by City — Organic vs Paid</div>
+        <div class="csub">AppsFlyer · Pincode rolled up to city · Period total · <span id="instCityRangeLabel"></span></div>
+      </div>
+      <div id="instCityNoteDisplay" style="font-size:11px;color:var(--muted);text-align:right;"></div>
+    </div>
+    <div class="cwrap" style="height:300px;"><canvas id="ch_inst_city"></canvas></div>
   </div>
 </div>
 
@@ -2026,8 +2276,14 @@ const minDate       = allDates[0]||'';
 const maxDate       = allDates[allDates.length-1]||'';
 const today         = new Date().toISOString().split('T')[0];
 const view90        = allDates.length>=90 ? allDates[allDates.length-90] : minDate;
-const ORANGE='#E8450A', NAVY='#1B2A3B', NAVY_L='#3B5068',
-      OBG='rgba(232,69,10,.10)', NBG='rgba(59,80,104,.10)', GREY_C='rgba(107,114,128,.4)';
+const view7         = allDates.length>=7  ? allDates[allDates.length-7]  : minDate;
+// Brand palette — Supertails Brand Guidelines 2026
+const BRAND_GREEN='#19be05', BRAND_GREEN_STROKE='#75b52f',
+      BRAND_ORANGE='#ff6914', BRAND_ORANGE_STROKE='#ca5310',
+      INK='#0a0a0a';
+// Legacy aliases — primary signal kept on green; secondary on dark ink
+const ORANGE=BRAND_GREEN, NAVY=INK, NAVY_L='#4b5563',
+      OBG='rgba(25,190,5,.12)', NBG='rgba(10,10,10,.06)', GREY_C='rgba(107,114,128,.45)';
 const NOISE_CITIES  = ['(not set)', 'Ashburn'];
 const CITY_KEY_TO_STORE = {
   'direct':        'direct_sessions',  'total_paid':    'total_paid_sessions',
@@ -2044,7 +2300,7 @@ const bStart0  = maxDate ? addDays(maxDate,-29) : minDate;
 const bEnd0    = maxDate;
 let refreshOn=true, countdown=300;
 let activeCity='all';
-let gran='W';
+let gran='D';
 let currentSlice=null;
 let sessTog=new Set(['total_nonpaid_sessions','total_paid_sessions']);
 let corrTog=new Set(['branded_search','direct_sessions','brand_paid_sessions','perf_sessions','direct_installs','revenue_india','brand_spend','perf_spend']);
@@ -2428,7 +2684,7 @@ function getCitySessionArr(key){
 
 // ── Initialise date pickers
 // (allDates, minDate, maxDate, today, view90 declared at top of script)
-document.getElementById('viewStart').value = view90;
+document.getElementById('viewStart').value = view7;
 document.getElementById('viewEnd').value   = maxDate;
 document.getElementById('viewStart').min   = minDate;
 document.getElementById('viewEnd').min     = minDate;
@@ -2616,9 +2872,9 @@ function mkChart(id,labels,datasets,opts){
         }}
       },
       scales:{
-        x:{grid:{display:false},ticks:{font:{size:9},maxRotation:45,maxTicksLimit:14}},
+        x:{grid:{display:false},ticks:{font:{size:11,weight:'600'},maxRotation:45,maxTicksLimit:14}},
         y:{grid:{color:'#F3F4F6'},ticks:{
-          font:{size:9},beginAtZero:false,
+          font:{size:11,weight:'600'},beginAtZero:false,
           callback: isCurrency ? v=>(v>=100000?'\u20B9'+(v/100000).toFixed(1)+'L':v>=1000?'\u20B9'+(v/1000).toFixed(0)+'k':'\u20B9'+v) : v=>(v>=100000?(v/100000).toFixed(1)+'L':v>=1000?(v/1000).toFixed(0)+'k':v)
         }}
       }
@@ -2903,6 +3159,7 @@ function renderDashboard(slice,g){
   // Re-render the combo charts using current toggle states
   renderAllSessions(slice, g);
   renderInstSplit(slice, g);
+  renderInstByCity(slice);
   renderBvP(slice, g);
   renderSpend(slice, g);
   renderCorrelation(slice, g);
@@ -2986,7 +3243,7 @@ function renderBvP(slice, g){
       responsive:true, maintainAspectRatio:false,
       interaction:{mode:'index',intersect:false},
       plugins:{
-        legend:{display:true,position:'top',labels:{color:'rgba(255,255,255,.7)',font:{size:10},boxWidth:10,padding:8}},
+        legend:{display:true,position:'top',labels:{color:'rgba(10,10,10,.75)',font:{size:10},boxWidth:10,padding:8}},
         tooltip:{callbacks:{
           label:c=>`${c.dataset.label}: ${Math.round(c.raw||0).toLocaleString('en-IN')}`,
           footer:items=>{
@@ -2999,8 +3256,8 @@ function renderBvP(slice, g){
         }}
       },
       scales:{
-        x:{stacked:true,grid:{color:'rgba(255,255,255,.04)'},ticks:{color:'rgba(255,255,255,.5)',font:{size:9},maxTicksLimit:14}},
-        y:{stacked:true,grid:{color:'rgba(255,255,255,.06)'},ticks:{color:'rgba(255,255,255,.5)',font:{size:9},callback:v=>v>=1000?(v/1000).toFixed(0)+'k':v}}
+        x:{stacked:true,grid:{color:'rgba(10,10,10,.05)'},ticks:{color:'rgba(10,10,10,.55)',font:{size:11,weight:'600'},maxTicksLimit:14}},
+        y:{stacked:true,grid:{color:'rgba(10,10,10,.07)'},ticks:{color:'rgba(10,10,10,.55)',font:{size:11,weight:'600'},callback:v=>v>=1000?(v/1000).toFixed(0)+'k':v}}
       }
     }
   });
@@ -3037,7 +3294,7 @@ function renderInstSplit(slice, g){
       responsive:true, maintainAspectRatio:false,
       interaction:{mode:'index',intersect:false},
       plugins:{
-        legend:{display:true,position:'top',labels:{color:'rgba(255,255,255,.7)',font:{size:10},boxWidth:10,padding:8}},
+        legend:{display:true,position:'top',labels:{color:'rgba(10,10,10,.75)',font:{size:10},boxWidth:10,padding:8}},
         tooltip:{callbacks:{
           label:c=>`${c.dataset.label}: ${Math.round(c.raw||0).toLocaleString('en-IN')}`,
           footer:items=>{
@@ -3050,8 +3307,88 @@ function renderInstSplit(slice, g){
         }}
       },
       scales:{
-        x:{stacked:true,grid:{color:'rgba(255,255,255,.04)'},ticks:{color:'rgba(255,255,255,.5)',font:{size:9},maxTicksLimit:14}},
-        y:{stacked:true,grid:{color:'rgba(255,255,255,.06)'},ticks:{color:'rgba(255,255,255,.5)',font:{size:9},callback:v=>v>=1000?(v/1000).toFixed(0)+'k':v}}
+        x:{stacked:true,grid:{color:'rgba(10,10,10,.05)'},ticks:{color:'rgba(10,10,10,.55)',font:{size:11,weight:'600'},maxTicksLimit:14}},
+        y:{stacked:true,grid:{color:'rgba(10,10,10,.07)'},ticks:{color:'rgba(10,10,10,.55)',font:{size:11,weight:'600'},callback:v=>v>=1000?(v/1000).toFixed(0)+'k':v}}
+      }
+    }
+  });
+}
+
+// ── Installs by City (horizontal stacked bar — period totals) ────────────────
+function renderInstByCity(slice){
+  const cityDaily = S.installs_city_daily || {};
+  const dates = slice.dates || [];
+  const totals = {};   // city → {organic, paid}
+  for(const d of dates){
+    const row = cityDaily[d];
+    if(!row) continue;
+    for(const [city, v] of Object.entries(row)){
+      if(!totals[city]) totals[city] = {organic:0, paid:0};
+      totals[city].organic += (v && v.organic) || 0;
+      totals[city].paid    += (v && v.paid)    || 0;
+    }
+  }
+
+  const TRACKED = ['Bangalore','Mumbai','Delhi','Chennai','Hyderabad','Pune','Kolkata','Ahmedabad'];
+  const ordered = [];
+  for(const c of TRACKED){
+    if(totals[c] && (totals[c].organic||totals[c].paid)) ordered.push(c);
+  }
+  // Append any other resolved cities (Other / Unknown) at the end
+  for(const c of Object.keys(totals)){
+    if(!TRACKED.includes(c) && (totals[c].organic||totals[c].paid)) ordered.push(c);
+  }
+
+  const labels   = ordered;
+  const orgVals  = ordered.map(c => totals[c].organic);
+  const paidVals = ordered.map(c => totals[c].paid);
+
+  const rangeEl = document.getElementById('instCityRangeLabel');
+  if(rangeEl && dates.length) rangeEl.textContent = dates[0] + ' \u2013 ' + dates[dates.length-1];
+
+  const noteEl = document.getElementById('instCityNoteDisplay');
+  if(noteEl){
+    if(!labels.length){
+      noteEl.innerHTML = '<span style="color:#f59e0b">No city data — fill the Installs_Raw sheet</span>';
+    } else {
+      const totOrg = orgVals.reduce((a,b)=>a+b,0);
+      const totPaid = paidVals.reduce((a,b)=>a+b,0);
+      noteEl.innerHTML = 'Period totals: <b style="color:#22c55e">'+totOrg.toLocaleString('en-IN')+' Organic</b> \u00B7 <b style="color:#f59e0b">'+totPaid.toLocaleString('en-IN')+' Paid</b>';
+    }
+  }
+
+  if(CI['ch_inst_city']){CI['ch_inst_city'].destroy(); delete CI['ch_inst_city'];}
+  if(!labels.length) return;
+  const ctx = document.getElementById('ch_inst_city').getContext('2d');
+  CI['ch_inst_city'] = new Chart(ctx,{
+    type:'bar',
+    data:{
+      labels,
+      datasets:[
+        {label:'Organic', data:orgVals,  backgroundColor:'#22c55ecc', borderColor:'#22c55e', borderWidth:1, stack:'inst'},
+        {label:'Paid',    data:paidVals, backgroundColor:'#f59e0bcc', borderColor:'#f59e0b', borderWidth:1, stack:'inst'},
+      ]
+    },
+    options:{
+      indexAxis:'y',
+      responsive:true, maintainAspectRatio:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{display:true,position:'top',labels:{color:'rgba(10,10,10,.75)',font:{size:10},boxWidth:10,padding:8}},
+        tooltip:{callbacks:{
+          label:c=>`${c.dataset.label}: ${Math.round(c.raw||0).toLocaleString('en-IN')}`,
+          footer:items=>{
+            const t=items.reduce((s,i)=>s+(i.raw||0),0);
+            if(!t) return '';
+            const o=items.find(i=>i.dataset.label==='Organic');
+            const op=o?Math.round((o.raw||0)/t*100):0;
+            return `Organic ${op}% \u00B7 Paid ${100-op}% \u00B7 Total ${t.toLocaleString('en-IN')}`;
+          }
+        }}
+      },
+      scales:{
+        x:{stacked:true,grid:{color:'rgba(10,10,10,.07)'},ticks:{color:'rgba(10,10,10,.55)',font:{size:11,weight:'600'},callback:v=>v>=1000?(v/1000).toFixed(1)+'k':v}},
+        y:{stacked:true,grid:{color:'rgba(10,10,10,.05)'},ticks:{color:'rgba(10,10,10,.75)',font:{size:11}}}
       }
     }
   });
@@ -3101,7 +3438,7 @@ function renderSpend(slice, g){
       responsive:true, maintainAspectRatio:false,
       interaction:{mode:'index',intersect:false},
       plugins:{
-        legend:{display:true,position:'top',labels:{color:'rgba(255,255,255,.7)',font:{size:10},boxWidth:10,padding:8}},
+        legend:{display:true,position:'top',labels:{color:'rgba(10,10,10,.75)',font:{size:10},boxWidth:10,padding:8}},
         tooltip:{callbacks:{
           label:c=>c.dataset.label+': \u20B9'+Math.round(c.raw||0).toLocaleString('en-IN'),
           footer:items=>{
@@ -3114,8 +3451,8 @@ function renderSpend(slice, g){
         }}
       },
       scales:{
-        x:{stacked:true,grid:{color:'rgba(255,255,255,.04)'},ticks:{color:'rgba(255,255,255,.5)',font:{size:9},maxTicksLimit:14}},
-        y:{stacked:true,grid:{color:'rgba(255,255,255,.06)'},ticks:{color:'rgba(255,255,255,.5)',font:{size:9},
+        x:{stacked:true,grid:{color:'rgba(10,10,10,.05)'},ticks:{color:'rgba(10,10,10,.55)',font:{size:11,weight:'600'},maxTicksLimit:14}},
+        y:{stacked:true,grid:{color:'rgba(10,10,10,.07)'},ticks:{color:'rgba(10,10,10,.55)',font:{size:11,weight:'600'},
            callback:v=>v>=1e6?'\u20B9'+(v/1e6).toFixed(1)+'M':v>=1e3?'\u20B9'+(v/1e3).toFixed(0)+'k':'\u20B9'+v}}
       }
     }
@@ -3182,17 +3519,17 @@ function renderCorrelation(slice, g){
         legend:{display:true,position:'top',labels:{font:{size:10},boxWidth:10,padding:6}},
         tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.raw!=null?Math.round(c.raw):'—'}`}},
         annotation:{annotations:{
-          baseline:{type:'line',yMin:100,yMax:100,borderColor:'rgba(255,255,255,.25)',
-                    borderWidth:1,borderDash:[4,3],
+          baseline:{type:'line',yMin:100,yMax:100,borderColor:'rgba(10,10,10,.25)',
+                    borderWidth:1.5,borderDash:[4,3],
                     label:{content:'Baseline = 100',enabled:true,position:'start',
-                           color:'rgba(255,255,255,.4)',font:{size:9}}}
+                           color:'rgba(10,10,10,.45)',font:{size:11,weight:'600'}}}
         }}
       },
       scales:{
-        x:{grid:{color:'rgba(255,255,255,.04)'},ticks:{color:'rgba(255,255,255,.5)',font:{size:9},maxTicksLimit:12}},
-        y:{grid:{color:'rgba(255,255,255,.06)'},ticks:{color:'rgba(255,255,255,.5)',font:{size:9},
+        x:{grid:{color:'rgba(10,10,10,.05)'},ticks:{color:'rgba(10,10,10,.55)',font:{size:11,weight:'600'},maxTicksLimit:12}},
+        y:{grid:{color:'rgba(10,10,10,.07)'},ticks:{color:'rgba(10,10,10,.55)',font:{size:11,weight:'600'},
            callback:v=>v+''},
-           title:{display:true,text:'Index (100 = baseline)',color:'rgba(255,255,255,.4)',font:{size:9}}}
+           title:{display:true,text:'Index (100 = baseline)',color:'rgba(10,10,10,.45)',font:{size:11,weight:'600'}}}
       }
     }
   });
@@ -3497,7 +3834,7 @@ function downloadCorrCSV(){
 }
 
 // ── Initial render (last 90 days)
-renderDashboard(sliceByDate(view90,maxDate),gran);
+renderDashboard(sliceByDate(view7,maxDate),gran);
 </script>
 </body>
 </html>"""
