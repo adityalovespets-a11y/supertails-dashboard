@@ -26,7 +26,8 @@
   "baselines": {
     "_comment": "Pre-campaign weekly averages (Jan 5 \u2013 Mar 22 2026, excl. WTF Sale). All-India. Locked Apr 12.",
     "_organic_installs_recompute": "Recomputed 2026-04-28 from BQ→Sheet pipeline. Window: Mar 1\u2013Mar 22 + Apr 6\u2013Apr 14 (31 clean days, excl WTF Sale Mar 23\u2013Apr 5 and Unlocking Bangalore launch Apr 15). Daily mean 810, weekly 5668. Combined-window chosen over strict pre-WTF to neutralize organic uptrend bias.",
-    "branded_search_impressions": 9044,
+    "_branded_search_recompute": "Recomputed 2026-04-29 (final). Method: GSC API-side filter (`query contains 'supertails' + 'super tails'`) with no query dimension — returns one aggregate per day, immune to 25k row-limit truncation. Window: Jan 5-Mar 22 + Apr 6-Apr 14 (86 clean days). Daily mean 1756, weekly 12289. Replaces two prior incorrect values: 9044/wk (multi-day truncation) and 12575/wk (per-day still hit 25k cap). Method A over-counted by 3-4% on quiet days and under-counted by 10-17% on recent campaign days.",
+    "branded_search_impressions": 12289,
     "total_nonpaid_sessions_india": 694165,
     "total_paid_sessions_india": 324979,
     "direct_sessions_india": 63445,

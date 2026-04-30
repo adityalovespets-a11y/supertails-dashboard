@@ -57,8 +57,8 @@ def load_config(path="config.json"):
 SIGNAL_KEYS = [
     "branded_search", "direct_installs", "total_installs", "paid_installs",
     "direct_installs_blr", "paid_installs_blr",
-    # Revenue
-    "revenue_india", "revenue_blr", "orders_blr",
+    # Revenue + Orders
+    "revenue_india", "revenue_blr", "orders_blr", "orders_india",
     # GA4 traffic — all channels
     "total_nonpaid_sessions", "total_paid_sessions",
     # GA4 traffic — sub-breakdowns
@@ -142,6 +142,16 @@ def merge_into_store(store, day_data: dict):
     if not new_dates and not update_dates:
         return store
 
+    # Keys whose values get reconciled by their source over 1-3 days.
+    # Ad platforms revise spend after the fact; Meltwater backfills mentions.
+    # Always overwrite these to keep the store fresh.
+    _refresh_keys = {
+        "brand_spend", "perf_spend",
+        "brand_mentions", "hashtag_mentions", "negative_mentions",
+        "sov_percent", "negative_rate",
+        "competitor_huft", "competitor_wiggles", "competitor_petsutra",
+    }
+
     if not new_dates:
         # Only updating existing dates — patch in-place without rebuilding arrays
         date_to_idx = {d: i for i, d in enumerate(store["dates"])}
@@ -154,10 +164,7 @@ def merge_into_store(store, day_data: dict):
                 if k not in SIGNAL_KEYS or v is None:
                     continue
                 cur = new_store[k][j] if j < len(new_store[k]) else None
-                # Always overwrite Meltwater signals (they were often stored as 0 before the API fix)
-                _mw_keys = {"brand_mentions","hashtag_mentions","negative_mentions",
-                            "sov_percent","negative_rate","competitor_huft","competitor_wiggles","competitor_petsutra"}
-                if cur is None or (k in _mw_keys and cur == 0 and v > 0):
+                if cur is None or k in _refresh_keys:
                     new_store[k][j] = v
         for k in DICT_KEYS:
             if k in store:
@@ -181,9 +188,7 @@ def merge_into_store(store, day_data: dict):
             if i < len(store.get(k, [])):
                 new_store[k][j] = store[k][i]
 
-    # Fill new data (new dates + back-fill nulls/zeros on existing dates)
-    _mw_keys = {"brand_mentions","hashtag_mentions","negative_mentions",
-                "sov_percent","negative_rate","competitor_huft","competitor_wiggles","competitor_petsutra"}
+    # Fill new data (new dates + refresh existing dates for spend/Meltwater)
     for d, signals in day_data.items():
         j = date_to_idx[d]
         for k in SIGNAL_KEYS:
@@ -191,8 +196,8 @@ def merge_into_store(store, day_data: dict):
             if v is None:
                 continue
             cur = new_store[k][j]
-            # Overwrite if null, or if Meltwater key was stored as 0 (pre-API-fix placeholder)
-            if cur is None or (k in _mw_keys and cur == 0 and v > 0):
+            # Overwrite if null OR if it's a late-reconciling key (spend, social mentions)
+            if cur is None or k in _refresh_keys:
                 new_store[k][j] = v
 
     # Preserve dict-type keys (city_sessions, city_list, gsc_queries, campaign_daily)
@@ -207,7 +212,23 @@ def merge_into_store(store, day_data: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def fetch_branded_search_daily(config, start_date, end_date):
-    """Returns { 'YYYY-MM-DD': impressions, ... }"""
+    """Returns { 'YYYY-MM-DD': impressions, ... }
+
+    Counts branded-search impressions per day using GSC's API-level filter
+    on the query dimension. No query dimension is used in the response, so
+    each call returns ONE aggregated row per day — immune to the 25k row-limit
+    truncation that affects per-query response shapes.
+
+    Coverage of the 172-term branded list is achieved with two `contains`
+    filters that subsume virtually every branded term:
+      filter 1: query contains 'supertails'   (covers all "supertails*" variants)
+      filter 2: query contains 'super tails'  (covers space-separated variants)
+    The two sets are disjoint (verified empirically: 'supertails' substring and
+    'super tails' substring never co-occur in the same query string), so we sum.
+    The single excluded branded term is 'danish sait pet app' (~5–50 imp/day,
+    rounding error). If precision matters for that term in the future, add a
+    third `contains 'danish sait'` filter.
+    """
     try:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
@@ -218,36 +239,46 @@ def fetch_branded_search_daily(config, start_date, end_date):
             scopes=["https://www.googleapis.com/auth/webmasters.readonly"]
         )
         svc = build("searchconsole", "v1", credentials=creds)
-        branded = [q.lower() for q in gsc["branded_queries"]]
+        country = gsc.get("geo_country", "ind")
 
-        resp = svc.searchanalytics().query(
-            siteUrl=gsc["site_url"],
-            body={
-                "startDate": start_date, "endDate": end_date,
-                "dimensions": ["date", "query"],
-                "dimensionFilterGroups": [{"filters": [{
-                    "dimension": "country", "operator": "equals",
-                    "expression": gsc.get("geo_country", "ind")
-                }]}],
-                "rowLimit": 25000
-            }
-        ).execute()
+        def _aggregate_for(d, contains_expr):
+            try:
+                resp = svc.searchanalytics().query(
+                    siteUrl=gsc["site_url"],
+                    body={
+                        "startDate": d, "endDate": d,
+                        "dimensions": [],
+                        "dimensionFilterGroups": [{"filters": [
+                            {"dimension": "country", "operator": "equals",
+                             "expression": country},
+                            {"dimension": "query", "operator": "contains",
+                             "expression": contains_expr},
+                        ]}],
+                        "rowLimit": 1,
+                    }
+                ).execute()
+            except Exception:
+                return None
+            rows = resp.get("rows", [])
+            return int(rows[0]["impressions"]) if rows else 0
 
         daily = {}
-        for row in resp.get("rows", []):
-            d, q = row["keys"][0], row["keys"][1].lower()
-            if any(b in q for b in branded):
-                daily[d] = daily.get(d, 0) + int(row.get("impressions", 0))
+        for d in date_range(start_date, end_date):
+            a = _aggregate_for(d, "supertails")
+            b = _aggregate_for(d, "super tails")
+            if a is None or b is None:
+                continue  # day too recent / API error → leave as None
+            daily[d] = a + b
 
-        # Fill zeros only for days GSC has had time to process (3-day lag)
+        # Fill zeros only for days GSC has had time to process.
+        # GSC's lag is ~2 days for high-traffic sites.
         from datetime import date as _date
-        lag_cutoff = (_date.today() - timedelta(days=3)).isoformat()
+        lag_cutoff = (_date.today() - timedelta(days=2)).isoformat()
         for d in date_range(start_date, end_date):
             if d <= lag_cutoff:
                 daily.setdefault(d, 0)
-            # Leave recent days as None — GSC hasn't processed them yet
 
-        print(f"    ✓ GSC: {len(daily)} days fetched")
+        print(f"    ✓ GSC: {len(daily)} days fetched (aggregate filter, no truncation)")
         return daily
     except Exception as e:
         print(f"    ✗ GSC failed: {e}")
@@ -1904,12 +1935,33 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
   <div class="ccrd"><div class="ctop"><div><div class="ctitle">Signal Correlation View</div><div class="csub">Indexed to 100 = baseline · Toggle signals above</div></div></div><div class="cwrap" style="height:300px;"><canvas id="ch_corr"></canvas></div></div>
 </div>
 
-<!-- 7 ─ ADDITIONAL CHARTS (revenue, brand vs perf sessions, paid breakdown, SOV) -->
+<!-- 7 ─ INDIA: ORDERS + REVENUE -->
 <div class="section" style="margin-top:14px;">
-  <div class="sec-hdr"><div class="sec-hdr-num">7</div><div class="sec-hdr-label">India NMV — <span id="revRangeLabel"></span></div></div>
+  <div class="sec-hdr"><div class="sec-hdr-num">7</div><div class="sec-hdr-label">India Orders &amp; NMV — <span id="revRangeLabel"></span></div></div>
 </div>
-<div class="charts" style="grid-template-columns:1fr;">
-  <div class="ccrd"><div class="ctop"><div><div class="ctitle">Daily / Weekly / Monthly Revenue (NMV)</div><div class="csub">All India · Supertails MCP · ₹</div></div></div><div class="cwrap" style="height:220px;"><canvas id="ch_rev"></canvas></div></div>
+<div class="charts">
+  <div class="ccrd">
+    <div class="ctop">
+      <div><div class="ctitle">India Daily Orders</div><div class="csub">Supertails MCP · All India · Order count</div></div>
+      <div style="text-align:right;">
+        <div style="font-size:18px;font-weight:800;color:var(--ink);" id="v_ind_orders">—</div>
+        <div style="font-size:10px;color:var(--muted);">latest day</div>
+        <div id="d_ind_orders" class="sdelta grey" style="margin-top:2px;">—</div>
+      </div>
+    </div>
+    <div class="cwrap"><canvas id="ch_ind_orders"></canvas></div>
+  </div>
+  <div class="ccrd">
+    <div class="ctop">
+      <div><div class="ctitle">India NMV (₹)</div><div class="csub">Supertails MCP · All India · Net Merchandise Value</div></div>
+      <div style="text-align:right;">
+        <div style="font-size:18px;font-weight:800;color:var(--ink);" id="v_ind_rev">—</div>
+        <div style="font-size:10px;color:var(--muted);">latest day</div>
+        <div id="d_ind_rev" class="sdelta grey" style="margin-top:2px;">—</div>
+      </div>
+    </div>
+    <div class="cwrap"><canvas id="ch_rev"></canvas></div>
+  </div>
 </div>
 
 <div class="section" style="margin-top:14px;">
@@ -2733,6 +2785,7 @@ function sliceByDate(start,end){
     revenue_india:       sl(S.revenue_india),
     revenue_blr:         sl(S.revenue_blr),
     orders_blr:          sl(S.orders_blr),
+    orders_india:        sl(S.orders_india),
     // All-traffic split
     total_nonpaid_sessions: sc('total_nonpaid'),
     total_paid_sessions:    _total_paid,
@@ -3088,6 +3141,40 @@ function renderDashboard(slice,g){
                 : g==='M' ? (baselines.revenue_india_weekly||0)*30/7
                 : baselines.revenue_india_daily||0;
   mkChart('ch_rev', revL, [ds(revV,'India NMV (\u20B9)','#14b8a6','#14b8a622'), baseds(revBase, revL.length)],{currency:true,csIdx:csIdx(revSK,g)});
+
+  // India Orders chart + KPI cards (paired with India NMV)
+  {
+    const IND_ORD_BASE = 3200; // baseline daily avg orders (Jan-Mar 2026 ex-WTF)
+    const {labels:ioL, values:ioV, sortKeys:ioSK} = aggregate(slice.dates, slice.orders_india, g);
+    const ioBase = g==='W' ? IND_ORD_BASE*7 : g==='M' ? IND_ORD_BASE*30 : IND_ORD_BASE;
+    mkChart('ch_ind_orders', ioL, [ds(ioV,'India Orders','#19be05','#19be0526'), baseds(ioBase, ioL.length)],{csIdx:csIdx(ioSK,g)});
+
+    const indOrdVals = (slice.orders_india||[]).filter(v=>v!=null);
+    const indRevVals = (slice.revenue_india||[]).filter(v=>v!=null);
+    if(indOrdVals.length){
+      const latest = indOrdVals[indOrdVals.length-1];
+      const el = document.getElementById('v_ind_orders');
+      if(el) el.textContent = latest.toLocaleString('en-IN');
+      const dl = document.getElementById('d_ind_orders');
+      if(dl){
+        const pct = ((latest/IND_ORD_BASE)-1)*100;
+        dl.textContent = (pct>=0?'+':'')+pct.toFixed(1)+'% vs baseline';
+        dl.className = 'sdelta '+(pct>=5?'green':pct<=-5?'red':'grey');
+      }
+    }
+    if(indRevVals.length){
+      const latest = indRevVals[indRevVals.length-1];
+      const el = document.getElementById('v_ind_rev');
+      if(el) el.textContent = '\u20B9'+(latest/100000).toFixed(1)+'L';
+      const dl = document.getElementById('d_ind_rev');
+      if(dl){
+        const base = baselines.revenue_india_daily || 5687130;
+        const pct = ((latest/base)-1)*100;
+        dl.textContent = (pct>=0?'+':'')+pct.toFixed(1)+'% vs baseline';
+        dl.className = 'sdelta '+(pct>=5?'green':pct<=-5?'red':'grey');
+      }
+    }
+  }
 
   // ── BLR Orders + Revenue charts ──────────────────────────────────────────
   {
