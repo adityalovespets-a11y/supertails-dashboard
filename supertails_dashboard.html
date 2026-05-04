@@ -1632,18 +1632,26 @@ function renderDashboard(slice,g){
   currentSlice=slice;
 
   // Signal cards — granularity-aware (latest period total vs scaled baseline)
-  // granVal: get last non-null aggregated period total for given array + granularity
+  // granVal: average per day across the selected slice (single day = absolute).
+  // This makes signal-card numbers consistent with the chart's selected window
+  // and comparable to the daily baseline regardless of granularity.
   function granVal(arr){
-    const {values,counts}=aggregate(slice.dates,arr,g);
-    // Require minimum days to consider a period complete
-    const minDays = g==='W' ? 5 : g==='M' ? 20 : 1;
-    for(let i=values.length-1;i>=0;i--){
-      if(values[i]!=null&&values[i]>0&&counts[i]>=minDays) return values[i];
-    }
-    return null;
+    if(!arr) return null;
+    const valid=arr.filter(v=>v!=null&&v>0);
+    if(!valid.length) return null;
+    const avg = valid.reduce((a,b)=>a+b,0)/valid.length;
+    return avg;
   }
-  // granBase: scale a weekly baseline to match current granularity
+  // granBase (for top signal cards):
+  //   Always return DAILY baseline since granVal() now returns daily avg.
+  //   Charts use scaledBase(wk) at chart-rendering time separately.
   function granBase(wkBase){
+    if(!wkBase) return 0;
+    return wkBase/7;
+  }
+  // chartBase: scale a weekly baseline to match the chart's granularity
+  // (used by chart bars where weekly view sums 7 days into one bar)
+  function chartBase(wkBase){
     if(!wkBase) return 0;
     if(g==='D') return wkBase/7;
     if(g==='M') return wkBase*30/7;
@@ -1667,9 +1675,9 @@ function renderDashboard(slice,g){
 
   // ── BLR Orders top card ──────────────────────────────────────────────────
   {
-    const BLR_ORD_BASE_WK = 691*7;  // March avg: 691/day → 4837/wk (granBase expects weekly)
+    const BLR_ORD_BASE_DAILY = 753; // Mar 1-22 gross (matches BLR_ORD_BASE in section 8)
     const ablr = granVal(slice.orders_blr);
-    const blrBase = granBase(BLR_ORD_BASE_WK);
+    const blrBase = BLR_ORD_BASE_DAILY;
     updateCard('v_blr_orders_card','bl_blr_orders','d_blr_orders_card','b_blr_orders','cmp_blr_orders',ablr,blrBase,10);
     // Override unit label per granularity
     const suBlr = document.getElementById('su_blr_orders');
@@ -1753,7 +1761,7 @@ function renderDashboard(slice,g){
     const {labels,values,sortKeys}=aggregate(slice.dates,c.arr,g);
     const color=c.color||ORANGE;
     const bg=color+'26';
-    const scaledBase=granBase(c.base);
+    const scaledBase=chartBase(c.base);
     mkChart(c.id,labels,[ds(values,c.label,color,bg),baseds(scaledBase,labels.length)],{csIdx:csIdx(sortKeys,g)});
   });
 
@@ -1761,7 +1769,7 @@ function renderDashboard(slice,g){
   {
     const {labels:iL, values:totV, sortKeys:iSK} = aggregate(slice.dates, slice.total_installs, g);
     const {values:orgV}                           = aggregate(slice.dates, slice.direct_installs, g);
-    const orgBase = granBase(baselines.direct_installs_india||baselines.direct_installs_bangalore||0);
+    const orgBase = chartBase(baselines.direct_installs_india||baselines.direct_installs_bangalore||0);
     mkChart('ch2', iL, [
       ds(totV, 'Total Installs',   '#f59e0b', '#f59e0b26'),
       ds(orgV, 'Organic Installs', '#fb923c', '#fb923c26'),
@@ -1777,7 +1785,7 @@ function renderDashboard(slice,g){
   paidBreak.forEach(c=>{
     const {labels,values,sortKeys}=aggregate(slice.dates,c.arr,g);
     const bg=c.color+'26';
-    const scaledBase=granBase(c.base);
+    const scaledBase=chartBase(c.base);
     mkChart(c.id,labels,[ds(values,c.label,c.color,bg),baseds(scaledBase,labels.length)],{csIdx:csIdx(sortKeys,g)});
   });
 
