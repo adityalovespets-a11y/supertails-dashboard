@@ -25,8 +25,8 @@
   },
   "baselines": {
     "_comment": "Pre-campaign weekly averages (Jan 5 \u2013 Mar 22 2026, excl. WTF Sale). All-India. Locked Apr 12.",
-    "_organic_installs_recompute": "Recomputed 2026-04-28 from BQ→Sheet pipeline. Window: Mar 1\u2013Mar 22 + Apr 6\u2013Apr 14 (31 clean days, excl WTF Sale Mar 23\u2013Apr 5 and Unlocking Bangalore launch Apr 15). Daily mean 810, weekly 5668. Combined-window chosen over strict pre-WTF to neutralize organic uptrend bias.",
-    "_branded_search_recompute": "Recomputed 2026-04-29 (final). Method: GSC API-side filter (`query contains 'supertails' + 'super tails'`) with no query dimension — returns one aggregate per day, immune to 25k row-limit truncation. Window: Jan 5-Mar 22 + Apr 6-Apr 14 (86 clean days). Daily mean 1756, weekly 12289. Replaces two prior incorrect values: 9044/wk (multi-day truncation) and 12575/wk (per-day still hit 25k cap). Method A over-counted by 3-4% on quiet days and under-counted by 10-17% on recent campaign days.",
+    "_organic_installs_recompute": "Recomputed 2026-04-28 from BQ\u2192Sheet pipeline. Window: Mar 1\u2013Mar 22 + Apr 6\u2013Apr 14 (31 clean days, excl WTF Sale Mar 23\u2013Apr 5 and Unlocking Bangalore launch Apr 15). Daily mean 810, weekly 5668. Combined-window chosen over strict pre-WTF to neutralize organic uptrend bias.",
+    "_branded_search_recompute": "Recomputed 2026-04-29 (final). Method: GSC API-side filter (`query contains 'supertails' + 'super tails'`) with no query dimension \u2014 returns one aggregate per day, immune to 25k row-limit truncation. Window: Jan 5-Mar 22 + Apr 6-Apr 14 (86 clean days). Daily mean 1756, weekly 12289. Replaces two prior incorrect values: 9044/wk (multi-day truncation) and 12575/wk (per-day still hit 25k cap). Method A over-counted by 3-4% on quiet days and under-counted by 10-17% on recent campaign days.",
     "branded_search_impressions": 12289,
     "total_nonpaid_sessions_india": 694165,
     "total_paid_sessions_india": 324979,
@@ -34,13 +34,14 @@
     "brand_paid_sessions_india": 162760,
     "blr_paid_sessions_india": 23215,
     "direct_installs_india": 5668,
-    "revenue_india_daily": 5687130,
-    "revenue_india_weekly": 39809911,
+    "revenue_india_daily": 5982861,
+    "revenue_india_weekly": 41880026,
     "new_customers_india_per_week": 0,
     "revenue_india_per_week": 0,
     "gads_brand_spend_per_week": 0,
     "gads_brand_clicks_per_week": 0,
-    "gads_brand_impressions_per_week": 0
+    "gads_brand_impressions_per_week": 0,
+    "_revenue_india_recompute": "Inflated by 1.052x on 2026-05-04 to match gross (exclude_invalid=false) data. Old daily 5687130, new 5982861."
   },
   "google_search_console": {
     "service_account_key_path": "gsc_service_account.json",
@@ -303,9 +304,29 @@
         "platform": 5,
         "installs": 6
       },
-      "organic_sources": ["organic", "(none)", "(null)", "direct", "", "website", "web", "referral", "whatsapp", "chatgpt.com"],
-      "_organic_sources_note": "Anything not in this list (case-insensitive) is treated as Paid — including 'restricted' (iOS SKAN), 'googleadwords_int', 'facebook ads', 'google', 'apple search ads', 'meta', 'revx_int'.",
-      "tracked_cities": ["Bangalore", "Mumbai", "Delhi", "Chennai", "Hyderabad", "Pune", "Kolkata", "Ahmedabad"],
+      "organic_sources": [
+        "organic",
+        "(none)",
+        "(null)",
+        "direct",
+        "",
+        "website",
+        "web",
+        "referral",
+        "whatsapp",
+        "chatgpt.com"
+      ],
+      "_organic_sources_note": "Anything not in this list (case-insensitive) is treated as Paid \u2014 including 'restricted' (iOS SKAN), 'googleadwords_int', 'facebook ads', 'google', 'apple search ads', 'meta', 'revx_int'.",
+      "tracked_cities": [
+        "Bangalore",
+        "Mumbai",
+        "Delhi",
+        "Chennai",
+        "Hyderabad",
+        "Pune",
+        "Kolkata",
+        "Ahmedabad"
+      ],
       "city_aliases": {
         "bengaluru": "Bangalore",
         "bombay": "Mumbai",

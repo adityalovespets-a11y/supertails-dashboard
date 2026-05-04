@@ -3146,7 +3146,7 @@ function renderDashboard(slice,g){
 
   // India Orders chart + KPI cards (paired with India NMV)
   {
-    const IND_ORD_BASE = 3200; // baseline daily avg orders (Jan-Mar 2026 ex-WTF)
+    const IND_ORD_BASE = 3898; // 3200 * 1.218 (gross — Jan-Mar 2026 ex-WTF, exclude_invalid=false)
     const {labels:ioL, values:ioV, sortKeys:ioSK} = aggregate(slice.dates, slice.orders_india, g);
     const ioBase = g==='W' ? IND_ORD_BASE*7 : g==='M' ? IND_ORD_BASE*30 : IND_ORD_BASE;
     mkChart('ch_ind_orders', ioL, [ds(ioV,'India Orders','#19be05','#19be0526'), baseds(ioBase, ioL.length)],{csIdx:csIdx(ioSK,g)});
@@ -3180,8 +3180,10 @@ function renderDashboard(slice,g){
 
   // ── BLR Orders + Revenue charts ──────────────────────────────────────────
   {
-    const BLR_ORD_BASE = 691;   // baseline daily avg March 2026
-    const BLR_REV_BASE = 1142000; // baseline daily avg NMV
+    // Baselines in GROSS units (exclude_invalid=false) — matched to current data
+    // Pre-gross: 691 orders, ₹11.42L NMV. Inflation: orders 1.139x, NMV 1.032x.
+    const BLR_ORD_BASE = 787;     // 691 * 1.139 (gross)
+    const BLR_REV_BASE = 1178544; // 1,142,000 * 1.032 (gross)
     const blrOrl = document.getElementById('blrOrdRangeLabel');
     if(blrOrl) blrOrl.textContent = rng;
 
@@ -3204,7 +3206,7 @@ function renderDashboard(slice,g){
       if(el) el.textContent = latest.toLocaleString();
       const dl = document.getElementById('d_blr_orders');
       if(dl){
-        const pct = ((latest/691)-1)*100;
+        const pct = ((latest/BLR_ORD_BASE)-1)*100;
         dl.textContent = (pct>=0?'+':'')+pct.toFixed(1)+'% vs baseline';
         dl.className = 'sdelta '+(pct>=5?'green':pct<=-5?'red':'grey');
       }
