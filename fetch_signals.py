@@ -1681,9 +1681,13 @@ footer{text-align:center;padding:20px;font-size:10px;color:var(--muted);}
 <!-- VIEW CONTROLS (date range + granularity) -->
 <div class="controls">
   <span class="ctrl-label">View</span>
-  <input type="date" class="date-input" id="viewStart">
-  <span class="ctrl-arrow">→</span>
-  <input type="date" class="date-input" id="viewEnd">
+  <input type="date" class="date-input" id="viewStart" onchange="syncSingleDay()">
+  <span class="ctrl-arrow" id="viewArrow">→</span>
+  <input type="date" class="date-input" id="viewEnd" onchange="syncSingleDay()">
+  <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);cursor:pointer;font-weight:600;margin-left:6px;">
+    <input type="checkbox" id="singleDay" onchange="toggleSingleDay()" style="cursor:pointer;">
+    Single day
+  </label>
   <div class="ctrl-divider"></div>
   <span class="ctrl-label">Granularity</span>
   <div class="gran-btns">
@@ -2742,6 +2746,38 @@ document.getElementById('viewStart').min   = minDate;
 document.getElementById('viewEnd').min     = minDate;
 document.getElementById('viewStart').max   = maxDate;
 document.getElementById('viewEnd').max     = maxDate;
+
+// Single-day toggle: when checked, hides 'end' picker and uses viewStart as both
+function toggleSingleDay(){
+  const cb = document.getElementById('singleDay');
+  const ve = document.getElementById('viewEnd');
+  const va = document.getElementById('viewArrow');
+  const vs = document.getElementById('viewStart');
+  if(cb.checked){
+    ve.value = vs.value;
+    ve.style.display = 'none';
+    va.style.display = 'none';
+  } else {
+    ve.style.display = '';
+    va.style.display = '';
+  }
+  applyView();
+}
+// If user manually sets viewEnd == viewStart, auto-check the toggle
+function syncSingleDay(){
+  const vs = document.getElementById('viewStart').value;
+  const ve = document.getElementById('viewEnd').value;
+  const cb = document.getElementById('singleDay');
+  if(vs && vs === ve && !cb.checked){
+    cb.checked = true;
+    document.getElementById('viewEnd').style.display = 'none';
+    document.getElementById('viewArrow').style.display = 'none';
+  } else if(vs !== ve && cb.checked){
+    cb.checked = false;
+    document.getElementById('viewEnd').style.display = '';
+    document.getElementById('viewArrow').style.display = '';
+  }
+}
 
 ['aStart','aEnd','bStart','bEnd'].forEach(id=>{
   document.getElementById(id).min=minDate;
