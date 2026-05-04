@@ -3109,14 +3109,15 @@ function renderDashboard(slice,g){
     const {labels,values,sortKeys}=aggregate(slice.dates,c.arr,g);
     const color=c.color||ORANGE;
     const bg=color+'26';
-    mkChart(c.id,labels,[ds(values,c.label,color,bg),baseds(c.base,labels.length)],{csIdx:csIdx(sortKeys,g)});
+    const scaledBase=granBase(c.base);
+    mkChart(c.id,labels,[ds(values,c.label,color,bg),baseds(scaledBase,labels.length)],{csIdx:csIdx(sortKeys,g)});
   });
 
   // Installs chart — Total + Organic as two series
   {
     const {labels:iL, values:totV, sortKeys:iSK} = aggregate(slice.dates, slice.total_installs, g);
     const {values:orgV}                           = aggregate(slice.dates, slice.direct_installs, g);
-    const orgBase = baselines.direct_installs_india||baselines.direct_installs_bangalore||0;
+    const orgBase = granBase(baselines.direct_installs_india||baselines.direct_installs_bangalore||0);
     mkChart('ch2', iL, [
       ds(totV, 'Total Installs',   '#f59e0b', '#f59e0b26'),
       ds(orgV, 'Organic Installs', '#fb923c', '#fb923c26'),
@@ -3132,7 +3133,8 @@ function renderDashboard(slice,g){
   paidBreak.forEach(c=>{
     const {labels,values,sortKeys}=aggregate(slice.dates,c.arr,g);
     const bg=c.color+'26';
-    mkChart(c.id,labels,[ds(values,c.label,c.color,bg),baseds(c.base,labels.length)],{csIdx:csIdx(sortKeys,g)});
+    const scaledBase=granBase(c.base);
+    mkChart(c.id,labels,[ds(values,c.label,c.color,bg),baseds(scaledBase,labels.length)],{csIdx:csIdx(sortKeys,g)});
   });
 
   // Revenue chart
