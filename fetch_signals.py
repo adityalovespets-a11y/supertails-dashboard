@@ -3146,7 +3146,7 @@ function renderDashboard(slice,g){
 
   // India Orders chart + KPI cards (paired with India NMV)
   {
-    const IND_ORD_BASE = 3898; // 3200 * 1.218 (gross — Jan-Mar 2026 ex-WTF, exclude_invalid=false)
+    const IND_ORD_BASE = 4127; // computed from store gross data, clean ex-WTF window (Mar 1-22 + Apr 6-14, n=31)
     const {labels:ioL, values:ioV, sortKeys:ioSK} = aggregate(slice.dates, slice.orders_india, g);
     const ioBase = g==='W' ? IND_ORD_BASE*7 : g==='M' ? IND_ORD_BASE*30 : IND_ORD_BASE;
     mkChart('ch_ind_orders', ioL, [ds(ioV,'India Orders','#19be05','#19be0526'), baseds(ioBase, ioL.length)],{csIdx:csIdx(ioSK,g)});
@@ -3182,8 +3182,8 @@ function renderDashboard(slice,g){
   {
     // BLR baselines in GROSS units, computed from clean ex-WTF window
     // (Mar 1-22 + Apr 6-14, n=31 days). Recomputed 2026-05-04.
-    const BLR_ORD_BASE = 760;     // gross orders/day
-    const BLR_REV_BASE = 1200000; // ₹12.00L/day gross
+    const BLR_ORD_BASE = 779;     // gross orders/day
+    const BLR_REV_BASE = 1201000; // ₹12.00L/day gross
     const blrOrl = document.getElementById('blrOrdRangeLabel');
     if(blrOrl) blrOrl.textContent = rng;
 
