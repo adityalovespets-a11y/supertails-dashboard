@@ -3180,10 +3180,10 @@ function renderDashboard(slice,g){
 
   // ── BLR Orders + Revenue charts ──────────────────────────────────────────
   {
-    // Baselines in GROSS units (exclude_invalid=false) — matched to current data
-    // Pre-gross: 691 orders, ₹11.42L NMV. Inflation: orders 1.139x, NMV 1.032x.
-    const BLR_ORD_BASE = 787;     // 691 * 1.139 (gross)
-    const BLR_REV_BASE = 1178544; // 1,142,000 * 1.032 (gross)
+    // BLR baselines in GROSS units, computed from clean ex-WTF window
+    // (Mar 1-22 + Apr 6-14, n=31 days). Recomputed 2026-05-04.
+    const BLR_ORD_BASE = 760;     // gross orders/day
+    const BLR_REV_BASE = 1200000; // ₹12.00L/day gross
     const blrOrl = document.getElementById('blrOrdRangeLabel');
     if(blrOrl) blrOrl.textContent = rng;
 
