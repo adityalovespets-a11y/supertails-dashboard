@@ -1795,28 +1795,30 @@ function renderDashboard(slice,g){
     const ioBase = g==='W' ? IND_ORD_BASE*7 : g==='M' ? IND_ORD_BASE*30 : IND_ORD_BASE;
     mkChart('ch_ind_orders', ioL, [ds(ioV,'India Orders','#19be05','#19be0526'), baseds(ioBase, ioL.length)],{csIdx:csIdx(ioSK,g)});
 
+    // KPI tile: shows AVERAGE of selected range (single day = absolute value)
     const indOrdVals = (slice.orders_india||[]).filter(v=>v!=null);
     const indRevVals = (slice.revenue_india||[]).filter(v=>v!=null);
-    if(indOrdVals.length){
-      const latest = indOrdVals[indOrdVals.length-1];
+    const indOrdAvg = indOrdVals.length ? indOrdVals.reduce((a,b)=>a+b,0)/indOrdVals.length : null;
+    const indRevAvg = indRevVals.length ? indRevVals.reduce((a,b)=>a+b,0)/indRevVals.length : null;
+    const indSingle = indOrdVals.length === 1;
+    if(indOrdAvg!=null){
       const el = document.getElementById('v_ind_orders');
-      if(el) el.textContent = latest.toLocaleString('en-IN');
+      if(el) el.textContent = Math.round(indOrdAvg).toLocaleString('en-IN');
       const dl = document.getElementById('d_ind_orders');
       if(dl){
-        const pct = ((latest/IND_ORD_BASE)-1)*100;
-        dl.textContent = (pct>=0?'+':'')+pct.toFixed(1)+'% vs baseline';
+        const pct = ((indOrdAvg/IND_ORD_BASE)-1)*100;
+        dl.textContent = (pct>=0?'+':'')+pct.toFixed(1)+'% '+(indSingle?'vs baseline':'avg/day vs baseline');
         dl.className = 'sdelta '+(pct>=5?'green':pct<=-5?'red':'grey');
       }
     }
-    if(indRevVals.length){
-      const latest = indRevVals[indRevVals.length-1];
+    if(indRevAvg!=null){
       const el = document.getElementById('v_ind_rev');
-      if(el) el.textContent = '\u20B9'+(latest/100000).toFixed(1)+'L';
+      if(el) el.textContent = '\u20B9'+(indRevAvg/100000).toFixed(1)+'L';
       const dl = document.getElementById('d_ind_rev');
       if(dl){
         const base = baselines.revenue_india_daily || 5687130;
-        const pct = ((latest/base)-1)*100;
-        dl.textContent = (pct>=0?'+':'')+pct.toFixed(1)+'% vs baseline';
+        const pct = ((indRevAvg/base)-1)*100;
+        dl.textContent = (pct>=0?'+':'')+pct.toFixed(1)+'% '+(indSingle?'vs baseline':'avg/day vs baseline');
         dl.className = 'sdelta '+(pct>=5?'green':pct<=-5?'red':'grey');
       }
     }
@@ -1841,28 +1843,29 @@ function renderDashboard(slice,g){
     const brBase = g==='W' ? BLR_REV_BASE*7 : g==='M' ? BLR_REV_BASE*30 : BLR_REV_BASE;
     mkChart('ch_blr_rev', brL, [ds(brV,'BLR NMV (\u20B9)','#f59e0b','#f59e0b26'), baseds(brBase, brL.length)],{currency:true,csIdx:csIdx(brSK,g)});
 
-    // KPI cards — latest day
+    // KPI tile: shows AVERAGE of selected range (single day = absolute value)
     const blrOrdVals = slice.orders_blr.filter(v=>v!=null);
     const blrRevVals = slice.revenue_blr.filter(v=>v!=null);
-    if(blrOrdVals.length){
-      const latest = blrOrdVals[blrOrdVals.length-1];
+    const blrOrdAvg = blrOrdVals.length ? blrOrdVals.reduce((a,b)=>a+b,0)/blrOrdVals.length : null;
+    const blrRevAvg = blrRevVals.length ? blrRevVals.reduce((a,b)=>a+b,0)/blrRevVals.length : null;
+    const blrSingle = blrOrdVals.length === 1;
+    if(blrOrdAvg!=null){
       const el = document.getElementById('v_blr_orders');
-      if(el) el.textContent = latest.toLocaleString();
+      if(el) el.textContent = Math.round(blrOrdAvg).toLocaleString();
       const dl = document.getElementById('d_blr_orders');
       if(dl){
-        const pct = ((latest/BLR_ORD_BASE)-1)*100;
-        dl.textContent = (pct>=0?'+':'')+pct.toFixed(1)+'% vs baseline';
+        const pct = ((blrOrdAvg/BLR_ORD_BASE)-1)*100;
+        dl.textContent = (pct>=0?'+':'')+pct.toFixed(1)+'% '+(blrSingle?'vs baseline':'avg/day vs baseline');
         dl.className = 'sdelta '+(pct>=5?'green':pct<=-5?'red':'grey');
       }
     }
-    if(blrRevVals.length){
-      const latest = blrRevVals[blrRevVals.length-1];
+    if(blrRevAvg!=null){
       const el = document.getElementById('v_blr_rev');
-      if(el) el.textContent = '\u20B9'+(latest/1e5).toFixed(1)+'L';
+      if(el) el.textContent = '\u20B9'+(blrRevAvg/1e5).toFixed(1)+'L';
       const dl = document.getElementById('d_blr_rev');
       if(dl){
-        const pct = ((latest/BLR_REV_BASE)-1)*100;
-        dl.textContent = (pct>=0?'+':'')+pct.toFixed(1)+'% vs baseline';
+        const pct = ((blrRevAvg/BLR_REV_BASE)-1)*100;
+        dl.textContent = (pct>=0?'+':'')+pct.toFixed(1)+'% '+(blrSingle?'vs baseline':'avg/day vs baseline');
         dl.className = 'sdelta '+(pct>=5?'green':pct<=-5?'red':'grey');
       }
     }
